@@ -1,0 +1,15 @@
+[package]
+name = "gentle-dot-pipe-bridge-windows"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = "3"
+napi-derive = "3"
+
+[build-dependencies]
+napi-build = "2"
