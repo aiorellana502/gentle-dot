@@ -34,6 +34,7 @@ import {
 	npmWrapper,
 	parseArgs,
 	symlinksIn,
+	TARGETS,
 	treeSize,
 	verifyChecksum,
 	versionFromReleaseUrl,
@@ -203,6 +204,19 @@ function installDaemonModules(out) {
 	};
 }
 
+/** Workspace-only native artifacts must be copied after npm has reconciled node_modules. */
+function installNativeAddon(out, target) {
+	if (TARGETS[target]?.platform !== "win32") return;
+	const source = join(REPO, "packages", "pipe-bridge-windows");
+	const destination = join(out, "daemon", "node_modules", "@gentle-dot", "pipe-bridge-windows");
+	mkdirSync(destination, { recursive: true });
+	for (const name of ["package.json", "index.js", "index.d.ts", "pipe-bridge-windows.win32-x64-msvc.node"]) {
+		const file = join(destination, name);
+		copyFileSync(join(source, name), file);
+		chmodSync(file, name.endsWith(".node") ? 0o755 : 0o644);
+	}
+}
+
 /** The Engram release to carry: the flag, else the user's own release version, else the latest release. */
 async function engramVersion(requested) {
 	if (requested) return { version: requested, source: "--engram-version" };
@@ -267,6 +281,7 @@ async function main() {
 	say("Daemon (build:runtime)");
 	run("pnpm", ["--filter", "@gentle-dot/daemon", "build:runtime", "--", "--out", out], { cwd: REPO });
 	const modules = installDaemonModules(out);
+	installNativeAddon(out, target);
 	const engram = await stageEngram(out, target, options.engramVersion);
 	say("Web UI");
 	run("pnpm", ["--filter", "@gentle-dot/ui", "build"], { cwd: REPO });

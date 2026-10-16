@@ -62,6 +62,13 @@ describe("build:runtime", () => {
 		expect(bundle).toContain('import("@earendil-works/pi-coding-agent")');
 	});
 
+	it("keeps the Windows addon dynamically imported but out of npm dependencies", () => {
+		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
+		const bundle = readFileSync(join(out, "daemon", "cli.mjs"), "utf8");
+		expect(manifest.dependencies).not.toHaveProperty("@gentle-dot/pipe-bridge-windows");
+		expect(bundle).toContain('import("@gentle-dot/pipe-bridge-windows")');
+	});
+
 	it("lists the external dependencies with the lockfile's exact versions", () => {
 		const manifest = JSON.parse(readFileSync(join(out, "daemon", "package.json"), "utf8"));
 		expect(manifest).toMatchObject({ private: true, type: "module" });

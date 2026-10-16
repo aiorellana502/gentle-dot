@@ -82,7 +82,9 @@ export async function buildRuntime(outDir: string): Promise<void> {
 		platform: "node",
 		format: "esm",
 		target: "node24",
-		external: Object.keys(dependencies),
+		// This workspace-only native addon cannot be bundled or fetched from a registry.
+		// Keep it out of the manifest; staging copies its built artifacts after npm install.
+		external: [...Object.keys(dependencies), "@gentle-dot/pipe-bridge-windows"],
 		logLevel: "error",
 	});
 	chmodSync(join(daemon, "cli.mjs"), 0o755);

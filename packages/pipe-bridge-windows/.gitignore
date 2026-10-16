@@ -1,0 +1,6 @@
+# Pure type declarations are committed so typechecking needs no native build.
+!index.d.ts
+
+# Platform-specific runtime artifacts remain generated build output.
+index.js
+*.node
