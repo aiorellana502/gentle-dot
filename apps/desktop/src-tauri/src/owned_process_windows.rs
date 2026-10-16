@@ -127,6 +127,37 @@ use windows_sys::Win32::System::Threading::{
     PROC_THREAD_ATTRIBUTE_HANDLE_LIST, STARTF_USESTDHANDLES, STARTUPINFOEXW, STARTUPINFOW,
 };
 
+/// Returns this process's PID and creation FILETIME for the Node server-identity check.
+/// This describes the caller, independently of any retained spawned-child identity.
+pub fn current_process_identity() -> io::Result<(u32, u64)> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, GetProcessTimes,
+    };
+
+    let mut created: FILETIME = unsafe { std::mem::zeroed() };
+    let mut exit = created;
+    let mut kernel = created;
+    let mut user = created;
+    // SAFETY: all outputs are valid; the current-process pseudo-handle is borrowed
+    // and must not be wrapped in an owning handle or closed.
+    if unsafe {
+        GetProcessTimes(
+            GetCurrentProcess(),
+            &mut created,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // Match the addon's creation_time exactly: high word first, no time conversion.
+    let creation_time = ((created.dwHighDateTime as u64) << 32) | created.dwLowDateTime as u64;
+    Ok((unsafe { GetCurrentProcessId() }, creation_time))
+}
+
 // Constructed only from successful creation APIs inside this module, never borrowed
 // or foreign handles. No Clone, raw-handle conversion, PID constructor, or attach API.
 struct Handle(HANDLE);
@@ -1590,6 +1621,31 @@ mod native_tests {
 mod tests {
     use super::*;
     use std::os::windows::ffi::OsStringExt;
+
+    #[test]
+    fn owned_current_process_identity_matches_self_and_is_stable() {
+        let first = current_process_identity().unwrap();
+        let second = current_process_identity().unwrap();
+        assert_eq!(first.0, std::process::id());
+        assert_ne!(first.1, 0);
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn owned_current_process_identity_creation_time_is_recent_filetime() {
+        const UNIX_EPOCH_AS_FILETIME: u64 = 116_444_736_000_000_000;
+        const DAY_IN_FILETIME_TICKS: u64 = 24 * 60 * 60 * 10_000_000;
+        let (_, created) = current_process_identity().unwrap();
+        let since_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap();
+        let now = UNIX_EPOCH_AS_FILETIME + (since_unix.as_nanos() / 100) as u64;
+        assert!(created <= now, "creation {created} is after now {now}");
+        assert!(
+            now - created < DAY_IN_FILETIME_TICKS,
+            "creation {created} is not recent (now {now})"
+        );
+    }
 
     fn wide(text: &str) -> Vec<u16> {
         text.encode_utf16().collect()
