@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { createServer, type Socket, connect as unixConnect } from "node:net";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -9,128 +9,109 @@ import { FAKE_AGENT, tempDir, waitFor } from "./helpers.ts";
 const CLI = fileURLToPath(new URL("../src/cli.ts", import.meta.url));
 
 describe("gentle-dot command", () => {
-	it("rejects stdio mode with self-check before writing any stdout", async () => {
-		const child = spawn(process.execPath, [CLI, "--app-channel-stdio", "--self-check"], {
-			stdio: ["pipe", "pipe", "pipe"],
+	it.each([
+		["--app-channel-named-pipe", "test"],
+		[
+			"--app-channel-named-pipe",
+			"test",
+			"--app-channel-named-pipe-server-pid",
+			"bad",
+			"--app-channel-named-pipe-server-created-at",
+			"1",
+		],
+		[
+			"--app-channel-named-pipe",
+			"test",
+			"--app-channel-named-pipe-server-pid",
+			"1",
+			"--app-channel-named-pipe-server-created-at",
+			"bad",
+		],
+		[
+			"--app-channel-named-pipe",
+			"test",
+			"--app-channel-named-pipe-server-pid",
+			"1",
+			"--app-channel-named-pipe-server-created-at",
+			"1",
+			"--self-check",
+		],
+		...[
+			["--app-channel-named-pipe-server-pid", "1"],
+			["--app-channel-named-pipe-server-created-at", "1"],
+			[
+				"--app-channel-named-pipe-server-pid",
+				"4294967296",
+				"--app-channel-named-pipe-server-created-at",
+				"1",
+			],
+			[
+				"--app-channel-named-pipe-server-pid",
+				"1",
+				"--app-channel-named-pipe-server-created-at",
+				"18446744073709551616",
+			],
+			...["-1", "1.5", "Infinity", "4294967296"].map((timeout) => [
+				"--app-channel-named-pipe-server-pid",
+				"1",
+				"--app-channel-named-pipe-server-created-at",
+				"1",
+				"--app-channel-named-pipe-timeout-ms",
+				timeout,
+			]),
+		].map((companions) => ["--app-channel-named-pipe", "test", ...companions]),
+	])("rejects invalid named-pipe selection before stdout: %j", async (...args) => {
+		const dataDir = join(tempDir(), "not-created");
+		const child = spawn(process.execPath, [CLI, ...args], {
+			stdio: ["ignore", "pipe", "pipe"],
+			env: { ...process.env, GENTLE_DOT_DATA_DIR: dataDir },
 		});
 		let stdout = "";
 		let stderr = "";
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString();
+		child.stdout.on("data", (bytes) => {
+			stdout += bytes;
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr.on("data", (bytes) => {
+			stderr += bytes;
 		});
-		const code = await new Promise((resolve) => child.on("close", resolve));
-		expect(code).toBe(1);
+		expect(await new Promise((resolve) => child.on("close", resolve))).toBe(1);
 		expect(stdout).toBe("");
-		expect(stderr).toMatch(/--app-channel-stdio.*--self-check/);
+		expect(stderr).toContain("--app-channel-named-pipe");
+		expect(existsSync(dataDir)).toBe(false);
 	});
-
-	it.skipIf(process.platform === "win32")("rejects stdio selection on non-Windows", async () => {
-		const child = spawn(process.execPath, [CLI, "--app-channel-stdio"], {
-			stdio: ["pipe", "pipe", "pipe"],
-		});
+	it("fails closed on a selected connection failure before configuration or stdout", async () => {
+		const dataDir = join(tempDir(), "not-created");
+		const child = spawn(
+			process.execPath,
+			[
+				CLI,
+				"--app-channel-named-pipe",
+				`\\\\.\\pipe\\gentle-dot-absent-${process.pid}-${Date.now()}`,
+				"--app-channel-named-pipe-server-pid",
+				"1",
+				"--app-channel-named-pipe-server-created-at",
+				"1",
+			],
+			{
+				stdio: ["ignore", "pipe", "pipe"],
+				env: { ...process.env, GENTLE_DOT_DATA_DIR: dataDir, GENTLE_DOT_PORT: "invalid" },
+			},
+		);
 		let stdout = "";
 		let stderr = "";
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout += chunk.toString();
+		child.stdout.on("data", (bytes) => {
+			stdout += bytes;
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr += chunk.toString();
+		child.stderr.on("data", (bytes) => {
+			stderr += bytes;
 		});
-		const code = await new Promise((resolve) => child.on("close", resolve));
-		expect(code).toBe(1);
+		expect(await new Promise((resolve) => child.on("close", resolve))).toBe(1);
 		expect(stdout).toBe("");
-		expect(stderr).toMatch(/only supported on Windows/);
+		expect(stderr).toContain(
+			process.platform === "win32" ? "PipeConnectionRefused" : "only supported on Windows",
+		);
+		expect(existsSync(dataDir)).toBe(false);
 	});
-
-	it.skipIf(process.platform !== "win32")(
-		"accepts Windows stdio mode without startup text and exits when its peer closes",
-		async () => {
-			const child = spawn(process.execPath, [CLI, "--app-channel-stdio"], {
-				env: {
-					...process.env,
-					GENTLE_DOT_DATA_DIR: join(tempDir(), "data"),
-					GENTLE_DOT_PORT: "0",
-					GENTLE_DOT_AGENT_BIN: process.execPath,
-					GENTLE_DOT_AGENT_ARGS: JSON.stringify([FAKE_AGENT]),
-				},
-				stdio: ["pipe", "pipe", "pipe"],
-			});
-			let stdout = "";
-			let stderr = "";
-			let pendingFrames = "";
-			child.stdout.on("data", (chunk: Buffer) => {
-				stdout += chunk.toString();
-				pendingFrames += chunk.toString();
-				for (let end = pendingFrames.indexOf("\n"); end >= 0; end = pendingFrames.indexOf("\n")) {
-					const line = pendingFrames.slice(0, end);
-					pendingFrames = pendingFrames.slice(end + 1);
-					try {
-						const frame = JSON.parse(line);
-						if (frame.kind === "request")
-							child.stdin.write(
-								`${JSON.stringify({
-									kind: "response",
-									id: frame.id,
-									result: null,
-								})}\n`,
-							);
-					} catch {
-						/* Startup text must fail the assertions below, not the event callback. */
-					}
-				}
-			});
-			child.stderr.on("data", (chunk: Buffer) => {
-				stderr += chunk.toString();
-			});
-			const exited = new Promise<number | null>((resolve) => child.on("close", resolve));
-			let code: number | null = null;
-			try {
-				// A real peer request must reach the daemon handler and return a framed answer.
-				await waitFor(() => stdout.includes('"method":"secret_get"'), 15_000);
-				child.stdin.write(`${JSON.stringify({ kind: "request", id: 71, method: "computer_unregister" })}\n`);
-				await waitFor(
-					() =>
-						stdout.split("\n").some((line) => {
-							try {
-								const frame = JSON.parse(line);
-								return frame.kind === "response" && frame.id === 71 && frame.result !== undefined;
-							} catch {
-								return false;
-							}
-						}),
-					15_000,
-				);
-				const answer = stdout
-					.split("\n")
-					.filter(Boolean)
-					.map((line) => JSON.parse(line))
-					.find((frame) => frame.kind === "response" && frame.id === 71 && frame.result !== undefined);
-				expect(answer).toEqual({ kind: "response", id: 71, result: {} });
-				expect(stdout).not.toContain("Gentle Dot is running");
-				expect(stdout).not.toContain("the access key is in");
-				for (const line of stdout.trim().split("\n")) expect(() => JSON.parse(line)).not.toThrow();
-				child.stdin.end();
-				let closed = false;
-				void exited.then((value) => {
-					code = value;
-					closed = true;
-				});
-				await waitFor(() => closed, 15_000);
-			} catch (error) {
-				throw new Error(`stdio exchange failed: stdout=${stdout}; stderr=${stderr}`, { cause: error });
-			} finally {
-				child.kill("SIGTERM");
-				await exited;
-			}
-			expect(code).toBe(0);
-			expect(stdout).not.toContain("Gentle Dot is running");
-			expect(stderr).toContain("the desktop app's channel closed; stopping the assistant");
-		},
-	);
-
 	it("keeps the access key out of redirected output, such as a log file", async () => {
 		const dataDir = join(tempDir(), "data");
 		const child = spawn(process.execPath, [CLI], {

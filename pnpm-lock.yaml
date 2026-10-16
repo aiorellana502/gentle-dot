@@ -44,6 +44,9 @@ importers:
       '@earendil-works/pi-tui':
         specifier: 1.0.4
         version: 1.0.4
+      '@gentle-dot/pipe-bridge-windows':
+        specifier: workspace:*
+        version: link:../pipe-bridge-windows
       '@gentle-dot/protocol':
         specifier: workspace:*
         version: link:../protocol

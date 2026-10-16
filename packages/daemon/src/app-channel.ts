@@ -1,8 +1,10 @@
 /**
  * The desktop app's private channel (S25.1–S25.3, docs/design.md "Security"). The app that launches
  * the daemon creates a connected pair of Unix sockets and hands one end to the daemon as fd 3. That
- * connection is the authentication: nothing is written to a file or an environment variable, and
- * there is no listening socket another process could reach. A daemon the app only attached to, one
+ * connection is the Unix authentication: nothing is written to a file or an environment variable,
+ * and there is no listening socket another process could reach. On Windows, explicit named-pipe
+ * selection verifies the server's retained process identity before exchanging protocol bytes.
+ * A daemon the app only attached to, one
  * started from a terminal, and the web have no channel, so privileged actions fail closed there.
  *
  * Frames are line-delimited JSON, in both directions:
@@ -15,7 +17,8 @@
 import { type StdioOptions, spawnSync } from "node:child_process";
 import { closeSync, fstatSync } from "node:fs";
 import { Socket } from "node:net";
-import { Duplex, type Readable, type Writable } from "node:stream";
+import { Duplex } from "node:stream";
+import type { VerifiedServer } from "@gentle-dot/pipe-bridge-windows";
 
 /** Where the app puts its end of the channel. */
 export const APP_FD = 3;
@@ -263,138 +266,70 @@ export function inheritedAppSocket(options: InheritedChannelOptions = {}): Socke
 	return new Socket({ fd, readable: true, writable: true });
 }
 
-export interface StdioChannelOptions extends AppChannelOptions {
-	/** Explicit nonsecret selection; never inferred from redirected streams. */
-	selected: boolean;
-	/** Injectable only to make platform selection deterministic in tests. */
+export interface NamedPipeChannelOptions extends AppChannelOptions {
+	pipeName: string;
+	expectedServerPid: number;
+	expectedServerCreatedAt: bigint;
+	timeoutMs: number;
+	/** Tests can exercise platform refusal without loading a native binary. */
 	platform?: NodeJS.Platform;
-	reader?: Readable;
-	writer?: Writable;
 }
 
-/**
- * Windows private-stdio bootstrap. Pipe possession is the capability, not proof of app origin.
- * Borrows the endpoints: closing detaches and pauses input, but never destroys/ends host stdio.
- * The future CLI owns process shutdown and must reserve stdout for protocol bytes in selected mode.
- */
-export function openStdioChannel(options: StdioChannelOptions): AppChannel | undefined {
-	if (!options.selected) return undefined;
-	if ((options.platform ?? process.platform) !== "win32") {
-		throw new Error("The stdio app channel is only supported on Windows.");
+/** Explicit Windows selection only; connection/identity failure never falls back to fd 3. */
+export async function openNamedPipeChannel(options: NamedPipeChannelOptions): Promise<AppChannel> {
+	if (process.platform !== "win32" || (options.platform ?? process.platform) !== "win32") {
+		throw new Error("The named-pipe app channel is only supported on Windows.");
 	}
-	const reader = options.reader ?? process.stdin;
-	const writer = options.writer ?? process.stdout;
-	const stream = new StdioDuplex(reader, writer);
-	const channel = new AppChannel(stream, options);
-	stream.start();
-	return channel;
+	// Never load the Windows-only binary on the default Unix or unselected Windows path.
+	const { connectVerified } = await import("@gentle-dot/pipe-bridge-windows");
+	const server = (await connectVerified(
+		options.pipeName,
+		options.expectedServerPid,
+		options.expectedServerCreatedAt,
+		options.timeoutMs,
+	)) as VerifiedServer;
+	return new AppChannel(new NamedPipeDuplex(server), options);
 }
 
-/** Bounded borrowed-stream bridge; at most one write is submitted to the endpoint at a time. */
-class StdioDuplex extends Duplex {
-	private completeWrite?: (error?: Error | null) => void;
-	private writeOutstanding = false;
-	private readonly data = (chunk: Buffer | string) => {
-		if (!this.push(chunk)) this.reader.pause();
-	};
-	private readonly eof = () => this.push(null);
-	private readonly failed = (error: Error) => this.destroy(error);
-	private readonly gone = () => this.destroy();
+const PIPE_CHUNK_SIZE = 64 * 1024;
+type PipeIO = Pick<VerifiedServer, "read" | "write" | "close">;
 
-	private readonly reader: Readable;
-	private readonly writer: Writable;
-
-	constructor(reader: Readable, writer: Writable) {
-		super({ readableHighWaterMark: 64 * 1024, writableHighWaterMark: 64 * 1024 });
-		this.reader = reader;
-		this.writer = writer;
+/** Node serializes _write calls; independently guard the asynchronous read direction. */
+export class NamedPipeDuplex extends Duplex {
+	private reading = false;
+	private readonly server: PipeIO;
+	constructor(server: PipeIO) {
+		super({ highWaterMark: PIPE_CHUNK_SIZE, allowHalfOpen: false });
+		this.server = server;
 	}
 
-	start(): void {
-		this.reader.on("data", this.data);
-		this.reader.on("end", this.eof);
-		this.reader.on("error", this.failed);
-		this.reader.on("close", this.gone);
-		this.writer.on("error", this.failed);
-		this.writer.on("close", this.gone);
-		this.writer.on("finish", this.gone);
-		if (
-			this.reader.destroyed ||
-			this.reader.readableEnded ||
-			this.writer.destroyed ||
-			this.writer.writableEnded
-		) {
-			this.destroy();
-		}
-	}
-
-	override _read(): void {
-		if (!this.destroyed) this.reader.resume();
-	}
-
-	override write(chunk: string | Uint8Array, callback?: (error?: Error | null) => void): boolean;
-	override write(
-		chunk: string | Uint8Array,
-		encoding: BufferEncoding,
-		callback?: (error?: Error | null) => void,
-	): boolean;
-	override write(
-		chunk: string | Uint8Array,
-		encodingOrCallback?: BufferEncoding | ((error?: Error | null) => void),
-		callback?: (error?: Error | null) => void,
-	): boolean {
-		const bytes =
-			typeof chunk === "string"
-				? Buffer.byteLength(chunk, typeof encodingOrCallback === "string" ? encodingOrCallback : "utf8")
-				: chunk.byteLength;
-		if (this.writableLength + bytes > MAX_FRAME + 1) {
-			const error = new Error("The app's stdio output queue is too long.");
-			this.destroy(error);
-			(typeof encodingOrCallback === "function" ? encodingOrCallback : callback)?.(error);
-			return false;
-		}
-		return typeof encodingOrCallback === "string"
-			? super.write(chunk, encodingOrCallback, callback)
-			: super.write(chunk, encodingOrCallback);
+	override _read(_size: number): void {
+		if (this.reading || this.destroyed) return;
+		this.reading = true;
+		Promise.resolve()
+			.then(() => this.server.read(PIPE_CHUNK_SIZE))
+			.then((bytes) => {
+				this.reading = false;
+				if (this.destroyed) return;
+				if (bytes !== null && !Buffer.isBuffer(bytes)) throw new Error("Invalid native pipe read result.");
+				this.push(bytes);
+			})
+			.catch((error: Error) => this.destroy(error));
 	}
 
 	override _write(chunk: Buffer, _encoding: BufferEncoding, done: (error?: Error | null) => void): void {
-		this.completeWrite = done;
-		this.writeOutstanding = true;
-		try {
-			this.writer.write(chunk, (error) => {
-				this.writeOutstanding = false;
-				const complete = this.completeWrite;
-				this.completeWrite = undefined;
-				complete?.(error);
-				if (this.destroyed) this.releaseWriterGuard();
-			});
-		} catch (error) {
-			this.writeOutstanding = false;
-			this.completeWrite = undefined;
-			done(error as Error);
-		}
-	}
-
-	private releaseWriterGuard(): void {
-		// The endpoint emits a callback failure as an error event after its callback.
-		// Pending borrowed I/O retains the guard even after adapter completion is cleared.
-		if (!this.writeOutstanding) setImmediate(() => this.writer.off("error", this.failed));
+		Promise.resolve()
+			.then(() => this.server.write(Buffer.from(chunk)))
+			.then(() => done(), done);
 	}
 
 	override _destroy(error: Error | null, done: (error?: Error | null) => void): void {
-		this.reader.pause();
-		this.reader.off("data", this.data);
-		this.reader.off("end", this.eof);
-		this.reader.off("error", this.failed);
-		this.reader.off("close", this.gone);
-		this.releaseWriterGuard();
-		this.writer.off("close", this.gone);
-		this.writer.off("finish", this.gone);
-		const complete = this.completeWrite;
-		this.completeWrite = undefined;
-		complete?.(error ?? new Error("The app's stdio channel closed."));
-		done(error);
+		try {
+			this.server.close();
+			done(error);
+		} catch (closeError) {
+			done(error ?? (closeError as Error));
+		}
 	}
 }
 
