@@ -224,6 +224,12 @@ impl Daemon {
         if let Some(system_root) = std::env::var_os("SystemRoot") {
             envs.push(("SystemRoot".into(), system_root));
         }
+        // The embedded agent (gentle-shell) resolves its own home through
+        // USERPROFILE on Windows; without it, its own system detection fails
+        // before it can run, same as SystemRoot above.
+        if let Some(user_profile) = std::env::var_os("USERPROFILE") {
+            envs.push(("USERPROFILE".into(), user_profile));
+        }
         envs.push(("GENTLE_DOT_PORT".into(), self.port.to_string().into()));
         envs.push((
             "GENTLE_DOT_DATA_DIR".into(),
@@ -574,6 +580,10 @@ mod tests {
                         "GENTLE_DOT_AGENT_ARGS".into(),
                         json!([fake_agent.to_str().unwrap()]).to_string().into(),
                     ),
+                    // This test proves the pipe/channel composition, not gentle-shell's own
+                    // first-run companion-package install, which hits the network and would
+                    // make this test slow and flaky.
+                    ("GENTLE_SHELL_NO_AUTO_SETUP".into(), "1".into()),
                 ],
             });
         daemon
