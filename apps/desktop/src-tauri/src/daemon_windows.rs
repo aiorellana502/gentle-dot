@@ -217,6 +217,13 @@ impl Daemon {
         // duration explicitly; Rust remains the outer, authoritative deadline.
         let deadline = Instant::now() + Duration::from_millis(timeout_ms.into());
         let mut envs = spec.envs.clone();
+        // Windows's crypto providers (what Node's own startup uses to seed its
+        // CSPRNG) resolve system DLLs through SystemRoot; an explicit replacement
+        // environment without it aborts the child before it can run anything.
+        // This is a required OS variable, not ambient-credential inheritance.
+        if let Some(system_root) = std::env::var_os("SystemRoot") {
+            envs.push(("SystemRoot".into(), system_root));
+        }
         envs.push(("GENTLE_DOT_PORT".into(), self.port.to_string().into()));
         envs.push((
             "GENTLE_DOT_DATA_DIR".into(),
@@ -522,6 +529,70 @@ mod tests {
             );
             std::thread::yield_now();
         }
+    }
+
+    // Only real-Node composition test in this file: every other test above spawns the
+    // compiled test binary itself under a fixture role (fixture_spec), never the
+    // production launch_spec target. This proves the build's own recorded Node/CLI
+    // launch spec, a real provider-free agent, and the public ensure_running start path
+    // (not the internal spawn_spec test hook the fixture tests use) compose end to end:
+    // bilateral identity auth, the duplex AppChannel, and HTTP /health all pass against
+    // the real packages/daemon CLI.
+    #[test]
+    fn windows_daemon_real_node_chat_round_trip() {
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .expect("repo root")
+            .to_path_buf();
+        let fake_agent = repo_root.join("packages/daemon/test/fixtures/fake-agent.ts");
+        assert!(
+            fake_agent.is_file(),
+            "missing fixture: {}",
+            fake_agent.display()
+        );
+        let node = OsString::from(env!("GENTLE_DOT_BUILD_NODE"));
+        let data_dir = std::env::temp_dir().join(format!(
+            "gentle-dot-windows-daemon-real-node-test-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&data_dir);
+        let port = {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.local_addr().unwrap().port()
+        };
+        let handler = Arc::new(Opened::default());
+        let daemon = Daemon::new(port, data_dir.clone(), None)
+            .with_channel(handler.clone())
+            .with_launch(LaunchSpec {
+                program: node.clone(),
+                args: vec![OsString::from(env!("GENTLE_DOT_BUILD_DAEMON_SCRIPT"))],
+                envs: vec![
+                    ("PATH".into(), env!("GENTLE_DOT_BUILD_PATH").into()),
+                    ("GENTLE_DOT_AGENT_BIN".into(), node),
+                    (
+                        "GENTLE_DOT_AGENT_ARGS".into(),
+                        json!([fake_agent.to_str().unwrap()]).to_string().into(),
+                    ),
+                ],
+            });
+        daemon
+            .ensure_running(Duration::from_secs(20))
+            .expect("the real Node daemon should start, authenticate and answer /health");
+        let channel = daemon
+            .channel()
+            .expect("verified channel over the real named pipe");
+        assert_eq!(handler.0.load(Ordering::SeqCst), 1);
+        // computer_unregister is a real production app-channel method (connectors.ts); with no
+        // computer ever registered by this channel it is a safe no-op that still proves the
+        // real daemon parsed and dispatched a request over the real transport.
+        assert_eq!(
+            channel.request("computer_unregister", json!({}), Duration::from_secs(5)),
+            Ok(json!({}))
+        );
+        daemon.stop();
+        assert!(!daemon.owns_running());
+        let _ = std::fs::remove_dir_all(&data_dir);
     }
 
     #[test]

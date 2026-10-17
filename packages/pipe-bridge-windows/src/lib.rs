@@ -16,9 +16,12 @@ use windows_sys::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED
 use windows_sys::Win32::{
     Foundation::{
         GetLastError, ERROR_FILE_NOT_FOUND, ERROR_PATH_NOT_FOUND, ERROR_PIPE_BUSY, FILETIME,
-        GENERIC_READ, GENERIC_WRITE, INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        INVALID_HANDLE_VALUE, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
-    Storage::FileSystem::{CreateFileW, OPEN_EXISTING},
+    Storage::FileSystem::{
+        CreateFileW, FILE_READ_ATTRIBUTES, FILE_READ_DATA, FILE_WRITE_DATA, OPEN_EXISTING,
+        SYNCHRONIZE,
+    },
     System::{
         Pipes::GetNamedPipeServerProcessId,
         Threading::{
@@ -425,13 +428,19 @@ impl Task for ConnectTask {
 
     fn compute(&mut self) -> Result<Self::Output> {
         let name: Vec<u16> = self.name.encode_utf16().chain(Some(0)).collect();
+        // Exactly the server's restrictive DACL grant (isolated_bootstrap_windows.rs's
+        // CLIENT_RIGHTS), not GENERIC_READ | GENERIC_WRITE: the kernel expands generic
+        // rights to bits (FILE_READ_EA, FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES) that the
+        // DACL deliberately does not grant, so a generic request is denied outright.
+        const CLIENT_RIGHTS: u32 =
+            FILE_READ_DATA | FILE_WRITE_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE;
         let pipe = loop {
             self.check_deadline()?;
             // Non-inheritable from creation; this exact verified handle serves I/O.
             let raw = unsafe {
                 CreateFileW(
                     name.as_ptr(),
-                    GENERIC_READ | GENERIC_WRITE,
+                    CLIENT_RIGHTS,
                     0,
                     std::ptr::null(),
                     OPEN_EXISTING,

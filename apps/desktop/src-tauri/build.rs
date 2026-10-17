@@ -30,8 +30,11 @@ const COMMANDS: &[&str] = &[
 ];
 
 fn find_in_path(program: &str, path: &str) -> Option<PathBuf> {
+    // `Path::is_file` checks the exact file name: it does not resolve platform
+    // executable extensions the way a shell would, so Windows needs `node.exe`.
+    let program = format!("{program}{}", env::consts::EXE_SUFFIX);
     env::split_paths(path)
-        .map(|dir| dir.join(program))
+        .map(|dir| dir.join(&program))
         .find(|candidate| candidate.is_file())
 }
 
@@ -45,10 +48,21 @@ fn main() {
         .unwrap_or_else(|| "node".into());
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let script = manifest_dir.join("../../../packages/daemon/src/cli.ts");
-    let script = script.canonicalize().unwrap_or(script);
+    let canonical = script.canonicalize().unwrap_or_else(|_| script.clone());
+    // On Windows, canonicalize() returns the \\?\ extended-length prefix, which
+    // Node's own path module does not parse and silently mangles. This path is
+    // well within ordinary length limits, so the plain form is all Node needs.
+    let script = canonical
+        .to_str()
+        .and_then(|value| value.strip_prefix(r"\\?\"))
+        .map(PathBuf::from)
+        .unwrap_or(canonical);
 
     println!("cargo:rustc-env=GENTLE_DOT_BUILD_NODE={node}");
-    println!("cargo:rustc-env=GENTLE_DOT_BUILD_DAEMON_SCRIPT={}", script.display());
+    println!(
+        "cargo:rustc-env=GENTLE_DOT_BUILD_DAEMON_SCRIPT={}",
+        script.display()
+    );
     println!("cargo:rustc-env=GENTLE_DOT_BUILD_PATH={path}");
     println!("cargo:rerun-if-env-changed=PATH");
     println!(
