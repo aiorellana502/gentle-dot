@@ -107,12 +107,15 @@ export interface ChatMessage {
 }
 
 export interface Notice {
+	/** Initial snapshot unavailable; removed only when a history snapshot succeeds. */
+	startupUnavailable?: boolean;
 	id: number;
 	level: "info" | "warning" | "error";
 	message: string;
 }
 
 export interface DotState {
+	initialHistoryLoaded?: boolean;
 	connection: ConnectionStatus;
 	agentState: AgentState;
 	/** This window's id for the desktop app's connector commands on its behalf (S25.2). */
@@ -232,6 +235,7 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				...rest,
 				...(message.pin ? { pin: message.pin } : {}),
 				agentState: message.agentState,
+				initialHistoryLoaded: false,
 				...(message.clientId ? { clientId: message.clientId } : {}),
 				// The daemon sends the queue right after ready when one exists.
 				queue: initialState.queue,
@@ -306,6 +310,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				conversationId: message.conversationId ?? state.conversationId,
 				messages: [...message.messages.map((m) => ({ ...m, streaming: false })), ...streaming],
 				hasEarlier: message.hasEarlier === true,
+				initialHistoryLoaded: true,
+				notices: state.notices.filter((n) => !n.startupUnavailable),
 			};
 		}
 		case "earlier": {
@@ -414,7 +420,8 @@ function reduceServer(state: DotState, message: ServerMessage): DotState {
 				CONNECTOR_REFUSALS.has(message.code) && starting
 					? { ...state, connectors: { ...state.connectors, flow: undefined } }
 					: state;
-			return addNotice(next, "error", message.message);
+			return addNotice(next, "error", message.message,
+				message.code === "agent_unavailable" && !state.initialHistoryLoaded);
 		}
 	}
 }
@@ -492,9 +499,9 @@ function updateAssistant(state: DotState, id: string, update: (m: ChatMessage) =
 	return { ...state, messages: state.messages.map((m, i) => (i === index ? update(m) : m)) };
 }
 
-function addNotice(state: DotState, level: Notice["level"], message: string): DotState {
+function addNotice(state: DotState, level: Notice["level"], message: string, startupUnavailable = false): DotState {
 	if (!message) return state;
-	return { ...state, notices: [...state.notices.slice(-4), { id: ++nextNotice, level, message }] };
+	return { ...state, notices: [...state.notices.slice(-4), { id: ++nextNotice, level, message, ...(startupUnavailable ? { startupUnavailable: true } : {}) }] };
 }
 
 function stopStreaming(message: ChatMessage): ChatMessage {

@@ -20,6 +20,8 @@ const TOKEN_KEY = "gentle-dot-token";
 export class DotClient {
 	private socket: WebSocket | undefined;
 	private ready = false;
+	private history: "pending" | "unavailable" | "loaded" = "pending";
+	private historyRetried = false;
 	private stopped = false;
 	private attempts = 0;
 	private retryTimer: ReturnType<typeof setTimeout> | undefined;
@@ -53,6 +55,8 @@ export class DotClient {
 		const socket = new Impl(this.info.url);
 		this.socket = socket;
 		this.ready = false;
+		this.history = "pending";
+		this.historyRetried = false;
 		this.handlers.onStatus("connecting");
 		socket.onopen = () => {
 			socket.send(JSON.stringify({ type: "hello", token: this.info.token, protocol: PROTOCOL_VERSION }));
@@ -64,7 +68,20 @@ export class DotClient {
 			} catch {
 				return;
 			}
+			if (socket !== this.socket || this.stopped) return;
 			this.handlers.onMessage(message);
+			if (message.type === "history") this.history = "loaded";
+			if (message.type === "error" && message.code === "agent_unavailable" && this.history === "pending") {
+				this.history = "unavailable";
+			}
+			// Retry only the failed initial snapshot, on authenticated agent readiness, on this socket.
+			if (message.type === "agent_state" &&
+				["idle", "thinking", "working", "needs_you"].includes(message.state) &&
+				this.history === "unavailable" && !this.historyRetried) {
+				this.historyRetried = true;
+				this.history = "pending";
+				this.send({ type: "get_history" });
+			}
 			if (message.type === "ready") {
 				this.ready = true;
 				this.attempts = 0;

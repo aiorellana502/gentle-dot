@@ -149,6 +149,16 @@ describe("reduce", () => {
 		expect(s.notices.map((n) => n.message)).toEqual(["Nope"]);
 	});
 
+	it("keeps post-start unavailable errors and unrelated notices when history refreshes", () => {
+		const s = apply(initialState,
+			{ type: "history", messages: [] },
+			{ type: "error", code: "agent_unavailable", message: "Later operation failed" },
+			{ type: "toast", level: "warning", message: "Keep warning" },
+			{ type: "history", messages: [] },
+		);
+		expect(s.notices.map((n) => n.message)).toEqual(["Later operation failed", "Keep warning"]);
+	});
+
 	it("stops streaming when the connection drops", () => {
 		const s = reduce(apply(initialState, { type: "agent_state", state: "thinking" }), {
 			type: "connection",

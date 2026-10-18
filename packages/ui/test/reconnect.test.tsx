@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ConnectionInfo } from "../src/client.ts";
 import { type DotState, initialState } from "../src/store.ts";
@@ -14,6 +14,7 @@ const h = vi.hoisted(() => ({
 	listeners: new Map<string, () => void>(),
 	infos: [] as (ConnectionInfo | undefined)[],
 	state: undefined as unknown as DotState,
+	registration: undefined as Promise<void> | undefined,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -28,6 +29,7 @@ vi.mock("@tauri-apps/api/event", () => ({
 vi.mock("../src/desktop.ts", async (importOriginal) => ({
 	...(await importOriginal<typeof import("../src/desktop.ts")>()),
 	onDesktopEvent: async (name: string, handler: () => void) => {
+		if (name === "dot://assistant-ready") await h.registration;
 		h.listeners.set(name, handler);
 		return () => h.listeners.delete(name);
 	},
@@ -59,6 +61,7 @@ async function reportReady() {
 
 beforeEach(() => {
 	h.listeners.clear();
+	h.registration = undefined;
 	h.infos = [];
 	h.state = { ...initialState, connection: "closed", agentState: "idle" };
 	h.connection = async () => {
@@ -72,11 +75,50 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+	cleanup();
 	vi.restoreAllMocks();
 	window.history.replaceState(null, "", "/");
 });
 
 describe("after the app refused its assistant (S35.2)", () => {
+	it("keeps the opaque panel fallback on native startup failure", async () => {
+		const timeout = "the assistant did not answer on port 4417";
+		h.connection = async () => { throw timeout; };
+		await renderApp("?surface=panel&effects=none");
+		expect(await screen.findByText(timeout)).toHaveAttribute("role", "status");
+		expect(screen.getByRole("status").closest(".chat")).toHaveClass("chat-panel");
+		expect(document.documentElement.dataset.effects).toBe("none");
+	}, 15_000);
+
+	it("preserves the web error surface", async () => {
+		await renderApp("");
+		expect((await screen.findByText(REFUSAL)).closest(".chat")).toHaveClass("chat-web");
+	});
+	it("recovers a timed-out panel when readiness preceded asynchronous listener registration", async () => {
+		let registered!: () => void;
+		h.registration = new Promise<void>((resolve) => { registered = resolve; });
+		const timeout = "the assistant did not answer on port 4317";
+		h.connection = async () => { throw timeout; };
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(timeout)).toHaveAttribute("role", "status");
+		expect(h.infos.at(-1)).toBeUndefined();
+		// The owned native starter succeeded, but the ready event had no listener yet.
+		h.connection = async () => INFO;
+		await act(async () => registered());
+		await waitFor(() => expect(h.infos.at(-1)).toEqual(INFO));
+		expect(screen.queryByText(timeout)).toBeNull();
+		expect(screen.getByRole("textbox")).toBeInTheDocument();
+	}, 15_000);
+
+	it("never adopts connection data while the native authenticated readiness gate refuses it", async () => {
+		await renderApp("?surface=panel");
+		expect(await screen.findByText(REFUSAL)).toBeInTheDocument();
+		await reportReady();
+		expect(screen.getByText(REFUSAL)).toBeInTheDocument();
+		expect(h.infos.every((info) => info === undefined)).toBe(true);
+		expect(screen.queryByRole("textbox")).toBeNull();
+	});
+
 	it("the panel connects once the app reports the assistant ready", async () => {
 		await renderApp("?surface=panel");
 		expect(await screen.findByText(REFUSAL)).toHaveAttribute("role", "status");
@@ -101,8 +143,9 @@ describe("after the app refused its assistant (S35.2)", () => {
 		await renderApp("?surface=panel");
 		await waitFor(() => expect(h.infos.at(-1)).toEqual(INFO));
 		const first = h.infos.at(-1);
+		const calls = h.invoke.mock.calls.filter(([c]) => c === "connection_info").length;
 		await reportReady();
-		await waitFor(() => expect(h.invoke.mock.calls.filter(([c]) => c === "connection_info")).toHaveLength(2));
+		await waitFor(() => expect(h.invoke.mock.calls.filter(([c]) => c === "connection_info")).toHaveLength(calls + 1));
 		expect(h.infos.at(-1)).toBe(first);
 	});
 });

@@ -73,6 +73,27 @@ describe("DotClient", () => {
 		]);
 	});
 
+	it("does not refetch successful history on running states, but refreshes after reconnect", () => {
+		const { client } = makeClient();
+		client.start();
+		const socket = FakeSocket.all[0]!;
+		socket.open();
+		socket.receive({ type: "ready", agentState: "working" });
+		socket.receive({ type: "history", messages: [] });
+		socket.receive({ type: "error", code: "agent_unavailable", message: "Other operation" });
+		socket.receive({ type: "agent_state", state: "idle" });
+		expect(socket.sent.filter((m) => (m as { type: string }).type === "get_history")).toHaveLength(1);
+		socket.drop();
+		vi.advanceTimersByTime(500);
+		const next = FakeSocket.all[1]!;
+		next.open();
+		next.receive({ type: "ready", agentState: "idle" });
+		expect(next.sent.slice(1)).toEqual([
+			{ type: "get_history" }, { type: "list_conversations" }, { type: "auth_list" },
+		]);
+		client.stop();
+	});
+
 	it("reconnects with backoff after a drop", () => {
 		const { client, statuses } = makeClient();
 		client.start();
@@ -128,6 +149,40 @@ describe("tokenFromLocation", () => {
 });
 
 describe("useDot.send", () => {
+	it("recovers initial history on the same socket after late agent readiness", () => {
+		vi.stubGlobal("WebSocket", FakeSocket);
+		const info = { url: "ws://localhost/ws", token: "test" };
+		const { result, unmount } = renderHook(() => useDot(info));
+		const socket = FakeSocket.all[0]!;
+		act(() => {
+			socket.open();
+			socket.receive({ type: "ready", agentState: "starting" });
+		});
+		const histories = () => socket.sent.filter((m) => (m as { type: string }).type === "get_history");
+		expect(histories()).toHaveLength(1);
+		act(() => {
+			socket.receive({ type: "error", code: "agent_unavailable", message: "Still starting" });
+			socket.receive({ type: "error", code: "declined", message: "Keep refusal" });
+			socket.receive({ type: "agent_state", state: "idle" });
+			socket.receive({ type: "agent_state", state: "working" });
+		});
+		expect(histories()).toHaveLength(2);
+		expect(result.current.state.notices.map((n) => n.message)).toEqual(["Still starting", "Keep refusal"]);
+		act(() => {
+			socket.receive({ type: "history", messages: [{ id: "h1", role: "user", text: "Recovered", activities: [] }] });
+			socket.receive({ type: "agent_state", state: "idle" });
+		});
+		expect(result.current.state.messages.map((m) => m.text)).toEqual(["Recovered"]);
+		expect(result.current.state.notices.map((n) => n.message)).toEqual(["Keep refusal"]);
+		expect(histories()).toHaveLength(2);
+		expect(FakeSocket.all).toHaveLength(1);
+		expect(socket.sent).toEqual([
+			{ type: "hello", token: "test", protocol: 1 },
+			{ type: "get_history" }, { type: "list_conversations" }, { type: "auth_list" },
+			{ type: "get_history" },
+		]);
+		unmount();
+	});
 	afterEach(() => vi.unstubAllGlobals());
 
 	it("reports whether the message was handed to an open connection", () => {
