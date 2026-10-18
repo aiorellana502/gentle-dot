@@ -39,6 +39,9 @@ fn launch_spec(env: impl Fn(&str) -> Option<OsString>, dev: bool) -> LaunchSpec 
             .unwrap_or_else(|| fallback.into())
     };
     let mut envs = vec![("PATH".into(), env!("GENTLE_DOT_BUILD_PATH").into())];
+    if env("GENTLE_SHELL_NO_AUTO_SETUP").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        envs.push(("GENTLE_SHELL_NO_AUTO_SETUP".into(), "1".into()));
+    }
     if dev {
         envs.push((
             "GENTLE_DOT_ALLOWED_ORIGINS".into(),
@@ -470,6 +473,24 @@ mod tests {
             launch_spec(|_| Some(OsString::new()), false),
             launch_spec(|_| None, false)
         );
+    }
+
+    #[test]
+    fn windows_daemon_launch_no_auto_setup_is_explicit() {
+        let baseline = launch_spec(|_| None, false);
+        for value in ["", "0", "true", " 1", "1 "] {
+            assert_eq!(launch_spec(|key| {
+                (key == "GENTLE_SHELL_NO_AUTO_SETUP").then(|| value.into())
+            }, false), baseline);
+        }
+        for dev in [false, true] {
+            let spec = launch_spec(|key| {
+                (key == "GENTLE_SHELL_NO_AUTO_SETUP").then(|| "1".into())
+            }, dev);
+            assert!(spec.envs.contains(&("GENTLE_SHELL_NO_AUTO_SETUP".into(), "1".into())));
+            assert_eq!(spec.program, baseline.program);
+            assert_eq!(spec.args, baseline.args);
+        }
     }
 
     #[test]
