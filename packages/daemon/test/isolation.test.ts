@@ -4,11 +4,12 @@ import {
 	readdirSync,
 	readFileSync,
 	realpathSync,
+	rmSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type DotDaemon, startDaemon } from "../src/daemon.ts";
 import {
 	ensureMemoryProject,
@@ -21,6 +22,72 @@ import { FAKE_AGENT, tempDir } from "./helpers.ts";
 const daemons: DotDaemon[] = [];
 afterEach(async () => {
 	await Promise.all(daemons.splice(0).map((d) => d.close()));
+});
+
+describe("isolatedAgentEnv Windows home", () => {
+	it("replaces inherited Windows home variables with the isolated home", () => {
+		const scratch = tempDir();
+		const base = {
+			HOME: join(scratch, "user"),
+			USERPROFILE: "C:\\Users\\synthetic-user",
+			HOMEDRIVE: "C:",
+			HOMEPATH: "\\Users\\synthetic-user",
+			GIT_CONFIG_GLOBAL: join(scratch, "gitconfig"),
+			ENGRAM_DATA_DIR: join(scratch, "memory"),
+			ENGRAM_PORT: "7500",
+			ENGRAM_URL: "http://127.0.0.1:7500",
+		};
+		try {
+			vi.stubGlobal("process", Object.create(process, { platform: { value: "win32" } }));
+			const env = isolatedAgentEnv(base, join(scratch, "data"));
+			const home = join(scratch, "data", "home");
+			expect(env.USERPROFILE).toBe(home);
+			expect(`${env.HOMEDRIVE}${env.HOMEPATH}`).toBe(home);
+			expect(env.HOME).toBe(home);
+			expect(env.XDG_CONFIG_HOME).toBe(join(home, ".config"));
+			expect(env.XDG_DATA_HOME).toBe(join(home, ".local", "share"));
+			expect(env.XDG_CACHE_HOME).toBe(join(home, ".cache"));
+			expect(env.XDG_STATE_HOME).toBe(join(home, ".local", "state"));
+			expect(env).toMatchObject({
+				GIT_CONFIG_GLOBAL: base.GIT_CONFIG_GLOBAL,
+				ENGRAM_DATA_DIR: base.ENGRAM_DATA_DIR,
+				ENGRAM_PORT: base.ENGRAM_PORT,
+				ENGRAM_URL: base.ENGRAM_URL,
+			});
+			expect(base.USERPROFILE).toBe("C:\\Users\\synthetic-user");
+		} finally {
+			vi.unstubAllGlobals();
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
+
+	it("preserves non-Windows inherited profile variables and default shared memory", () => {
+		const scratch = tempDir();
+		try {
+			for (const platform of ["linux", "darwin"]) {
+				vi.stubGlobal("process", Object.create(process, { platform: { value: platform } }));
+				const base = {
+					HOME: join(scratch, "user"),
+					USERPROFILE: "synthetic-profile",
+					HOMEDRIVE: "synthetic-drive",
+					HOMEPATH: "synthetic-path",
+					GIT_CONFIG_GLOBAL: join(scratch, "gitconfig"),
+				};
+				const env = isolatedAgentEnv(base, join(scratch, "data"));
+				expect(env).toMatchObject({
+					USERPROFILE: base.USERPROFILE,
+					HOMEDRIVE: base.HOMEDRIVE,
+					HOMEPATH: base.HOMEPATH,
+					GIT_CONFIG_GLOBAL: base.GIT_CONFIG_GLOBAL,
+					ENGRAM_DATA_DIR: join(base.HOME, ".engram"),
+					HOME: join(scratch, "data", "home"),
+				});
+			}
+		} finally {
+			vi.unstubAllGlobals();
+			rmSync(scratch, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("isolatedAgentEnv PATH", () => {

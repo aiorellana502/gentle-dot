@@ -2,7 +2,7 @@ import { execFile } from "node:child_process";
 import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, join, win32 } from "node:path";
 import { bundledGentleShell } from "./config.ts";
 import { directAccess, type EngineAccess } from "./engine-access.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
@@ -115,7 +115,8 @@ export function ensureMemoryProject(workspace: string, access: EngineAccess = di
 
 /**
  * The engine's environment: its own HOME (`<dataDir>/home`, mode 0700) with
- * the XDG folders under it, because parts of the engine write to fixed places
+ * the XDG folders under it. On Windows USERPROFILE and HOMEDRIVE/HOMEPATH
+ * resolve to that same home, because parts of the engine write to fixed places
  * under the home folder. PATH is kept, with the bundled `pi` folder first, and so is the user's git identity,
  * through `GIT_CONFIG_GLOBAL` pointing at their real `~/.gitconfig`.
  *
@@ -152,6 +153,12 @@ export function isolatedAgentEnv(
 		XDG_CACHE_HOME: join(home, ".cache"),
 		XDG_STATE_HOME: join(home, ".local", "state"),
 	};
+	if (process.platform === "win32") {
+		const root = win32.parse(home).root;
+		env.USERPROFILE = home;
+		env.HOMEDRIVE = root.slice(0, -1);
+		env.HOMEPATH = home.slice(Math.max(0, root.length - 1));
+	}
 	for (const key of [...INHERITED_HOMES, ...SUBAGENT_VARIABLES, ...DAEMON_ONLY]) delete env[key];
 	if (!base.TMPDIR) {
 		const tmp = join(home, ".cache", "tmp");
