@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
+/// Owned startup has a separate bounded budget from a window's connection request.
+pub const OWNED_START_TIMEOUT: Duration = Duration::from_secs(180);
 const BOOTSTRAP_MS: u32 = 5000;
 const DEV_ALLOWED_ORIGINS: &str = r#"["http://127.0.0.1:5173","http://localhost:5173"]"#;
 
@@ -644,6 +646,50 @@ mod tests {
         assert!(identity.live_pid().is_ok());
         drop(daemon);
         assert!(identity.live_pid().is_err());
+    }
+
+    #[test]
+    fn windows_daemon_startup_budget_is_independent_of_window_wait() {
+        assert_eq!(OWNED_START_TIMEOUT, Duration::from_secs(180));
+    }
+
+    #[test]
+    fn windows_daemon_window_timeout_does_not_cancel_owned_startup() {
+        let healthy = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let health = healthy.clone();
+        let ready = Arc::new(AtomicUsize::new(0));
+        let announced = ready.clone();
+        let daemon = Arc::new(
+            Daemon::new(1, PathBuf::new(), None)
+                .with_channel(Arc::new(Opened::default()))
+                .with_launch(fixture_spec("echo"))
+                .with_health(Arc::new(move || health.load(Ordering::SeqCst)))
+                .on_ready(Arc::new(move || {
+                    announced.fetch_add(1, Ordering::SeqCst);
+                })),
+        );
+        let starter = daemon.clone();
+        let start = std::thread::spawn(move || starter.ensure_running(Duration::from_secs(2)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while daemon.channel().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "owned fixture did not authenticate"
+            );
+            std::thread::yield_now();
+        }
+        assert_eq!(
+            daemon.wait_ready(Duration::ZERO),
+            Err("the assistant did not answer on port 1".into())
+        );
+        assert!(daemon.owns_running());
+        assert_eq!(ready.load(Ordering::SeqCst), 0);
+        healthy.store(true, Ordering::SeqCst);
+        assert_eq!(start.join().unwrap(), Ok(()));
+        assert_eq!(daemon.wait_ready(Duration::ZERO), Ok(()));
+        assert_eq!(ready.load(Ordering::SeqCst), 1);
+        daemon.stop();
+        assert!(!daemon.owns_running());
     }
 
     #[test]

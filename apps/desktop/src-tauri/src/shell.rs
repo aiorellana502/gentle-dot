@@ -47,6 +47,12 @@ const EDGE_MARGIN: i32 = 12;
 const PANEL_GAP: i32 = 8;
 const DRAG_SETTLE: Duration = Duration::from_millis(300);
 const DAEMON_START_TIMEOUT: Duration = Duration::from_secs(20);
+// A window may give up first; keep owned Windows startup bounded by the existing
+// agent startup budget, rather than killing it at the window's shorter deadline.
+#[cfg(target_os = "windows")]
+const OWNED_START_TIMEOUT: Duration = daemon::OWNED_START_TIMEOUT;
+#[cfg(not(target_os = "windows"))]
+const OWNED_START_TIMEOUT: Duration = DAEMON_START_TIMEOUT;
 /// Sent to the Dot and the panel each time the assistant this app may use starts answering (at
 /// launch or after Restart assistant): a window that was refused, or whose `connection_info` gave up
 /// first, asks again and connects without a reopen (S35.2).
@@ -172,10 +178,10 @@ async fn connector_command(app: AppHandle, client_id: String, message: serde_jso
     .map_err(err)?
 }
 
-/// Waits until the daemon this app launched answers `/health`, then returns its URLs and token.
+/// Waits for this app's authenticated channel and HTTP health, then returns its URLs and token.
 /// A daemon it did not launch is never used (S35.2): the answer is then the reason and its exit.
-/// Replacing an earlier app's daemon can take longer than this waits (up to 17 s before the spawn);
-/// the windows then connect on [`ASSISTANT_READY`].
+/// This window's 20 s wait does not cancel bounded owned Windows startup; the windows
+/// ask again on [`ASSISTANT_READY`] when that startup succeeds.
 #[tauri::command]
 async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
     let shell = app.state::<Shell>();
@@ -677,7 +683,7 @@ fn toggle_autostart(app: &AppHandle, menu: &Menu<tauri::Wry>) -> CommandResult {
 
 fn restart_daemon(app: AppHandle) {
     let (daemon, port) = (app.state::<Shell>().daemon.clone(), app.state::<Shell>().config.port);
-    thread::spawn(move || match daemon.restart(DAEMON_START_TIMEOUT) {
+    thread::spawn(move || match daemon.restart(OWNED_START_TIMEOUT) {
         RestartOutcome::Restarted => {}
         RestartOutcome::External => {
             show_message(&app, MessageDialogKind::Warning, &daemon::foreign_daemon_message(port))
@@ -801,7 +807,7 @@ pub fn run() {
             );
             let (starter, notifier) = (daemon.clone(), handle.clone());
             thread::spawn(move || {
-                if let Err(error) = starter.ensure_running(DAEMON_START_TIMEOUT) {
+                if let Err(error) = starter.ensure_running(OWNED_START_TIMEOUT) {
                     eprintln!("gentle-dot: {error}");
                     // Another daemon holds the port (S35.2): say so, with the way out, instead of using it.
                     if starter.refusal().is_some() {
