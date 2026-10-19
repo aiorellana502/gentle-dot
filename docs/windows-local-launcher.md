@@ -1,5 +1,9 @@
 # Open the existing local Windows app
 
+For a separate contributor profile, use the
+[Windows contributor preview](windows-contributor-preview.md), not this owner's
+preserved-profile launcher. The offline build prerequisites below still apply.
+
 Build once, then double-click `scripts/windows/local-launch.cmd`. Opening never
 builds, installs dependencies, starts Vite, or changes the selected login profile.
 This is a repository-local app, **not a portable executable or installer**.

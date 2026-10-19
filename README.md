@@ -1,4 +1,12 @@
 <!-- markdownlint-disable-next-line MD041 -->
+> [!IMPORTANT]
+> **Unofficial Windows contributor preview — aiorellana502 fork.**
+> This branch is experimental, not an upstream Windows release or installer.
+> Start with the [Windows contributor guide](docs/windows-contributor-preview.md)
+> for source prerequisites, a separate test profile, known gaps, and contribution steps.
+> The project description below is upstream documentation; it is not a list of
+> Windows features verified by this fork. Original MIT attribution is retained.
+
 <a id="top"></a>
 
 <div align="center">
