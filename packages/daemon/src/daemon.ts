@@ -377,7 +377,12 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	server.on("upgrade", (req, socket, head) => {
 		const url = new URL(req.url ?? "/", "http://localhost");
 		const origin = req.headers.origin;
-		if (url.pathname !== "/ws" || (origin !== undefined && !allowedOrigins(port, options).has(origin))) {
+		if (url.pathname !== "/ws" || (origin !== undefined && !(() => {
+			const allowed = allowedOrigins(port, options).has(origin);
+			if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS === "1")
+				log(`[startup-diagnostics] upgrade origin_allowed=${allowed} time_ms=${Date.now()}`);
+			return allowed;
+		})())) {
 			socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n");
 			return;
 		}

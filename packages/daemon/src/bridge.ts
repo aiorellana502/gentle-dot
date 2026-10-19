@@ -727,7 +727,15 @@ export class DotBridge {
 
 	/** Waits until the agent can take commands; gives up after a minute or when it stopped. */
 	private whenReady(): Promise<void> {
-		if (this.supervisor.state === "ready") return Promise.resolve();
+		const started = Date.now();
+		const trace = (phase: "entry" | "subscribed" | "ready" | "stopped" | "timeout") => {
+			if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS !== "1") return;
+			const state = this.supervisor.state;
+			const safe = ["starting", "ready", "stopped", "restarting"].includes(state) ? state : "unknown";
+			this.log(`[startup-diagnostics] history phase=${phase} state=${safe} elapsed_ms=${Date.now() - started}`);
+		};
+		trace("entry");
+		if (this.supervisor.state === "ready") { trace("ready"); return Promise.resolve(); }
 		return new Promise((resolve, reject) => {
 			const finish = (error?: Error) => {
 				clearTimeout(timer);
@@ -735,13 +743,14 @@ export class DotBridge {
 				if (error) reject(error);
 				else resolve();
 			};
-			const timer = setTimeout(() => finish(new Error("the agent did not start in time")), READY_TIMEOUT_MS);
+			const timer = setTimeout(() => { trace("timeout"); finish(new Error("the agent did not start in time")); }, READY_TIMEOUT_MS);
 			timer.unref();
 			const off = this.supervisor.onEvent((event) => {
 				if (event.type !== "supervisor_state") return;
-				if (event.state === "ready") finish();
-				else if (event.state === "stopped") finish(new Error("the agent stopped"));
+				if (event.state === "ready") { trace("ready"); finish(); }
+				else if (event.state === "stopped") { trace("stopped"); finish(new Error("the agent stopped")); }
 			});
+			trace("subscribed");
 		});
 	}
 

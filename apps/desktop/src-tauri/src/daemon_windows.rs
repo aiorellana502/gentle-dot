@@ -42,6 +42,9 @@ fn launch_spec(env: impl Fn(&str) -> Option<OsString>, dev: bool) -> LaunchSpec 
     if env("GENTLE_SHELL_NO_AUTO_SETUP").as_deref() == Some(std::ffi::OsStr::new("1")) {
         envs.push(("GENTLE_SHELL_NO_AUTO_SETUP".into(), "1".into()));
     }
+    if env("GENTLE_DOT_STARTUP_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        envs.push(("GENTLE_DOT_STARTUP_DIAGNOSTICS".into(), "1".into()));
+    }
     if dev {
         envs.push((
             "GENTLE_DOT_ALLOWED_ORIGINS".into(),
@@ -176,6 +179,9 @@ impl Daemon {
         if let Some(spec) = &self.launch {
             return self.spawn_spec(spec, BOOTSTRAP_MS);
         }
+        if startup_diagnostics() {
+            eprintln!("[startup-diagnostics] native phase=launch dev_origins_only={}", cfg!(debug_assertions));
+        }
         self.spawn_spec(
             &launch_spec(|key| std::env::var_os(key), cfg!(debug_assertions)),
             BOOTSTRAP_MS,
@@ -183,6 +189,22 @@ impl Daemon {
     }
 
     fn spawn_spec(&self, spec: &LaunchSpec, timeout_ms: u32) -> io::Result<()> {
+        let started = Instant::now();
+        let mut phases = Vec::new();
+        let result = self.spawn_spec_traced(spec, timeout_ms, &mut phases, started);
+        // Flush only after the ownership guard has been released, including on error.
+        if startup_diagnostics() {
+            for (phase, elapsed) in phases {
+                eprintln!("[startup-diagnostics] native phase={phase} elapsed_ms={elapsed}");
+            }
+            eprintln!("[startup-diagnostics] native phase=spawn_result ok={} elapsed_ms={}", result.is_ok(), started.elapsed().as_millis());
+        }
+        result
+    }
+
+    fn spawn_spec_traced(&self, spec: &LaunchSpec, timeout_ms: u32, phases: &mut Vec<(&'static str, u128)>, started: Instant) -> io::Result<()> {
+        let mut phase = |name| { if startup_diagnostics() { phases.push((name, started.elapsed().as_millis())); } };
+        phase("spawn_entry");
         let handler = self.handler.as_ref().ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -248,6 +270,7 @@ impl Daemon {
                 )
             },
         )?);
+        phase("spawned");
         #[cfg(test)]
         {
             *self.observed.lock().unwrap() = Some(child.0.retained_identity()?);
@@ -256,14 +279,17 @@ impl Daemon {
             .0
             .retained_identity()
             .map_err(|error| context("cannot retain the assistant's identity", error))?;
+        phase("auth_wait");
         let verified = endpoint
             .accept_owned(identity, deadline)
             .map_err(|error| context("cannot authenticate the assistant's channel", error))?;
+        phase("authenticated");
         let (reader, writer) = verified
             .into_duplex()
             .map_err(|error| context("cannot open the assistant's duplex channel", error))?;
         let channel = AppChannel::start_duplex(reader, writer, handler.clone())
             .map_err(|error| context("cannot start the assistant's channel", error))?;
+        phase("channel_open");
         owned.child = Some(child);
         owned.channel = Some(channel.clone());
         // No application callback runs under the ownership lock.
@@ -287,14 +313,26 @@ impl Daemon {
     /// HTTP health alone never establishes ownership or channel authentication.
     pub fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
         let started = Instant::now();
+        let enabled = startup_diagnostics();
+        let mut previous = None;
+        if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_entry budget_ms={}", timeout.as_millis()); }
         loop {
             if let Some(reason) = self.refusal() {
+                if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_refused elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err(reason);
             }
-            if self.channel().is_some() && self.is_healthy() {
+            let channel = self.channel().is_some();
+            let healthy = if channel { Some(self.is_healthy()) } else { None };
+            if enabled && previous != Some((channel, healthy)) {
+                eprintln!("[startup-diagnostics] native phase=wait_ready_gate channel_authenticated_open={channel} http_healthy={} elapsed_ms={}", match healthy { Some(true) => "true", Some(false) => "false", None => "NOT_EVALUATED" }, started.elapsed().as_millis());
+                previous = Some((channel, healthy));
+            }
+            if healthy == Some(true) {
+                if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_success elapsed_ms={}", started.elapsed().as_millis()); }
                 return Ok(());
             }
             if started.elapsed() >= timeout {
+                if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_timeout elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err(format!(
                     "the assistant did not answer on port {}",
                     self.port
@@ -381,6 +419,10 @@ impl Daemon {
             Err(reason) => RestartOutcome::Failed(reason),
         }
     }
+}
+
+fn startup_diagnostics() -> bool {
+    std::env::var_os("GENTLE_DOT_STARTUP_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
 
 pub fn runtime_dir(
@@ -490,6 +532,19 @@ mod tests {
             assert!(spec.envs.contains(&("GENTLE_SHELL_NO_AUTO_SETUP".into(), "1".into())));
             assert_eq!(spec.program, baseline.program);
             assert_eq!(spec.args, baseline.args);
+        }
+    }
+
+    #[test]
+    fn windows_daemon_launch_startup_diagnostics_is_explicit() {
+        for dev in [false, true] {
+            let baseline = launch_spec(|_| None, dev);
+            for value in ["", "0", "true", " 1", "1 "] {
+                assert_eq!(launch_spec(|key| (key == "GENTLE_DOT_STARTUP_DIAGNOSTICS").then(|| value.into()), dev), baseline);
+            }
+            let mut expected = baseline;
+            expected.envs.insert(1, ("GENTLE_DOT_STARTUP_DIAGNOSTICS".into(), "1".into()));
+            assert_eq!(launch_spec(|key| (key == "GENTLE_DOT_STARTUP_DIAGNOSTICS").then(|| "1".into()), dev), expected);
         }
     }
 
