@@ -17,7 +17,7 @@ Do not ask for, copy, upload or reuse the owner's profile or build cache.
 | Area | Current evidence / limit |
 | --- | --- |
 | Basic text chat and last conversation | Accepted manually on the original host/profile |
-| Separate preview launch environment | Synthetic process tests; not a real first login |
+| Separate preview launch environment | Eight isolated launcher tests passed independently; not a real first login |
 | Native pipe / startup recovery | Existing targeted tests; not a fresh-machine report |
 | Clean Windows setup | Not verified; prerequisite gaps below remain |
 | Voice, computer control, connectors, tools, private memory | Not validated for this preview |
