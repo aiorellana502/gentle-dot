@@ -115,14 +115,15 @@ export function readSessionMessages(file: string): unknown[] {
 const turnCache = new Map<string, { size: number; mtimeMs: number; turns: HistoryMessage[] }>();
 
 /** The display turns of one session file, cached while the file is unchanged (earlier files never change). */
-function sessionTurns(file: string): HistoryMessage[] {
+function sessionTurns(file: string, workspace?: string): HistoryMessage[] {
 	if (!existsSync(file)) return [];
 	const { size, mtimeMs } = statSync(file);
-	const cached = turnCache.get(file);
+	const key = `${file}\u0000${workspace ?? ""}`;
+	const cached = turnCache.get(key);
 	if (cached?.size === size && cached.mtimeMs === mtimeMs) return cached.turns;
-	const turns = historyFromMessages(readSessionMessages(file));
-	turnCache.delete(file);
-	turnCache.set(file, { size, mtimeMs, turns });
+	const turns = historyFromMessages(readSessionMessages(file), workspace);
+	turnCache.delete(key);
+	turnCache.set(key, { size, mtimeMs, turns });
 	if (turnCache.size > CACHED_FILES) turnCache.delete(turnCache.keys().next().value as string);
 	return turns;
 }
@@ -138,7 +139,7 @@ export interface HistoryPage {
  * Ids are `s<file index>-<turn number>`, which stay valid while the chain grows.
  * An unknown `before` yields an empty page.
  */
-export function pageHistory(chain: string[], limit: number, before?: string): HistoryPage {
+export function pageHistory(chain: string[], limit: number, before?: string, workspace?: string): HistoryPage {
 	let file = chain.length - 1;
 	let end = Number.POSITIVE_INFINITY;
 	if (before !== undefined) {
@@ -149,14 +150,14 @@ export function pageHistory(chain: string[], limit: number, before?: string): Hi
 	}
 	const page: HistoryMessage[] = [];
 	for (; file >= 0; file--, end = Number.POSITIVE_INFINITY) {
-		const turns = sessionTurns(chain[file] as string).slice(0, end);
+		const turns = sessionTurns(chain[file] as string, workspace).slice(0, end);
 		const start = Math.max(0, turns.length - (limit - page.length));
 		const earlier = file < chain.length - 1 ? { earlier: true as const } : {};
 		page.unshift(
 			...turns.slice(start).map((turn, i) => ({ ...turn, id: `s${file}-${start + i + 1}`, ...earlier })),
 		);
 		if (page.length >= limit) {
-			const more = start > 0 || chain.slice(0, file).some((path) => sessionTurns(path).length > 0);
+			const more = start > 0 || chain.slice(0, file).some((path) => sessionTurns(path, workspace).length > 0);
 			return { messages: page, hasEarlier: more };
 		}
 	}
@@ -166,7 +167,7 @@ export function pageHistory(chain: string[], limit: number, before?: string): Hi
 type AgentMessage = { role?: string; content?: unknown; toolCallId?: string; isError?: boolean };
 
 /** Converts Pi `get_messages` output into display messages; consecutive assistant messages form one turn. */
-export function historyFromMessages(messages: unknown[]): HistoryMessage[] {
+export function historyFromMessages(messages: unknown[], workspace?: string): HistoryMessage[] {
 	const failed = new Set<string>();
 	for (const raw of messages) {
 		const m = raw as AgentMessage;
@@ -195,18 +196,18 @@ export function historyFromMessages(messages: unknown[]): HistoryMessage[] {
 		}
 		const text = presentText(textOf(m));
 		if (text) turn.text = turn.text ? `${turn.text}\n\n${text}` : text;
-		turn.activities.push(...activitiesOf(m, failed));
+		turn.activities.push(...activitiesOf(m, failed, workspace));
 	}
 	return history;
 }
 
-function activitiesOf(message: AgentMessage, failed: Set<string>): Activity[] {
+function activitiesOf(message: AgentMessage, failed: Set<string>, workspace?: string): Activity[] {
 	if (!Array.isArray(message.content)) return [];
 	return message.content.flatMap((block: unknown) => {
 		const b = block as { type?: string; id?: string; name?: string; arguments?: unknown };
 		if (b?.type !== "toolCall" || typeof b.name !== "string") return [];
 		const id = b.id ?? b.name;
 		const status = failed.has(id) ? "failed" : "done";
-		return [{ id, ...describeTool(b.name, b.arguments, status), status } as Activity];
+		return [{ id, ...describeTool(b.name, b.arguments, status, workspace), status } as Activity];
 	});
 }

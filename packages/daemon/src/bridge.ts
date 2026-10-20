@@ -57,6 +57,8 @@ export interface BridgeClient {
 
 export interface BridgeOptions {
 	dataDir: string;
+	/** Trusted normalized absolute engine cwd; absent means targets stay hidden. */
+	workspace?: string;
 	log?: (line: string) => void;
 	auth?: AuthManager;
 	profiles?: ProfileStore;
@@ -140,7 +142,8 @@ export class DotBridge {
 	private readonly pinConfirmed = new WeakSet<ClientMessage>();
 	/** Told to every window that connects during this run (a connectors file set aside at start). */
 	private readonly notices: ServerPayload[] = [];
-	private readonly runningTools = new Set<string>();
+	/** Args captured at `tool_execution_start`, by call id; the end event omits them, so the target stays consistent across the call's lifecycle. */
+	private readonly runningTools = new Map<string, unknown>();
 	private readonly seenRequestIds: string[] = [];
 	private readonly sessionDir: string;
 	private readonly supervisor: AgentSupervisor;
@@ -632,7 +635,7 @@ export class DotBridge {
 				this.deliver(client, {
 					type: "earlier",
 					before: message.before,
-					...this.engine(() => pageHistory(this.chain(), this.pageSize(), message.before)),
+					...this.engine(() => pageHistory(this.chain(), this.pageSize(), message.before, this.options.workspace)),
 				});
 				return;
 		}
@@ -1147,7 +1150,7 @@ export class DotBridge {
 			// The engine writes a message to its session file right after announcing it;
 			// one round trip makes sure everything announced so far is on disk.
 			await this.supervisor.request({ type: "get_state" });
-			const page = this.engine(() => pageHistory(this.chain(), this.pageSize()));
+			const page = this.engine(() => pageHistory(this.chain(), this.pageSize(), undefined, this.options.workspace));
 			if (this.nextMessage === seen || attempt >= 2) return page;
 		}
 	}
@@ -1297,7 +1300,8 @@ export class DotBridge {
 	private onTool(event: AgentRecord): void {
 		const id = String(event.toolCallId ?? "");
 		const started = event.type === "tool_execution_start";
-		if (started) this.runningTools.add(id);
+		const args = started ? event.args : this.runningTools.get(id);
+		if (started) this.runningTools.set(id, event.args);
 		else this.runningTools.delete(id);
 		const status = started ? "running" : event.isError ? "failed" : "done";
 		// Start and end of one tool call must land on the same message.
@@ -1305,7 +1309,7 @@ export class DotBridge {
 		this.broadcast({
 			type: "activity",
 			messageId: this.assistantId,
-			activity: { id, ...describeTool(String(event.toolName ?? ""), event.args, status), status },
+			activity: { id, ...describeTool(String(event.toolName ?? ""), args, status, this.options.workspace), status },
 		});
 	}
 

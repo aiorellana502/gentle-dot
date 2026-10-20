@@ -1,8 +1,59 @@
 import { mkdirSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { resolveConversation } from "../src/conversations.ts";
+import { historyFromMessages, pageHistory, resolveConversation } from "../src/conversations.ts";
+import { describeTool } from "../src/presentation.ts";
 import { tempDir } from "./helpers.ts";
+
+describe("tool history", () => {
+	it("binds history targets and cached pages to the trusted workspace", () => {
+		const workspace = tempDir();
+		const messages = [{ role: "assistant", content: [
+			{ type: "toolCall", id: "safe", name: "read", arguments: { path: join(workspace, "src", "app.ts") } },
+			{ type: "toolCall", id: "external", name: "edit", arguments: { path: join(workspace, "..", "CANARY") } },
+		] }];
+		const activities = historyFromMessages(messages, workspace)[0]?.activities;
+		expect(activities?.[0]).toMatchObject({ tool: "read", target: "src/app.ts", status: "done" });
+		expect(activities?.[1]).not.toHaveProperty("target");
+		expect(JSON.stringify(activities)).not.toContain("CANARY");
+		const file = join(tempDir(), "targets.jsonl");
+		writeFileSync(file, JSON.stringify({ type: "message", message: messages[0] }));
+		expect(pageHistory([file], 1, undefined, workspace).messages[0]?.activities).toEqual(activities);
+		for (const context of [undefined, tempDir()]) {
+			for (const activity of pageHistory([file], 1, undefined, context).messages[0]?.activities ?? []) {
+				expect(activity).not.toHaveProperty("target");
+			}
+		}
+		expect(pageHistory([file], 1, undefined, workspace).messages[0]?.activities).toEqual(activities);
+	});
+
+	it("replays safe live details with failed results and preserves turn association and paging", () => {
+		const messages = [
+			{ role: "user", content: "Check" },
+			{ role: "assistant", content: [
+				{ type: "text", text: "Answer" },
+				{ type: "toolCall", id: "t1", name: "read", arguments: { path: "/CANARY/file", content: "CANARY" } },
+				{ type: "toolCall", id: "t2", name: "connector_CANARY", arguments: { command: "CANARY" } },
+			] },
+			{ role: "toolResult", toolCallId: "t1", isError: true, content: "CANARY error" },
+		];
+		const history = historyFromMessages(messages);
+		expect(history).toEqual([
+			{ id: "h1", role: "user", text: "Check", activities: [] },
+			{ id: "h2", role: "assistant", text: "Answer", activities: [
+				{ id: "t1", ...describeTool("read", {}, "failed"), status: "failed" },
+				{ id: "t2", kind: "other", title: "Finished", status: "done" },
+			] },
+		]);
+		expect(JSON.stringify(history)).not.toContain("CANARY");
+		const file = join(tempDir(), "history.jsonl");
+		writeFileSync(file, messages.map((message) => JSON.stringify({ type: "message", message })).join("\n"));
+		const page = pageHistory([file], 1);
+		expect(page).toEqual({ messages: [{ ...history[1], id: "s0-2" }], hasEarlier: true });
+		expect(pageHistory([file], 1)).toEqual(page);
+		expect(pageHistory([file], 1, "s0-2").messages).toEqual([{ ...history[0], id: "s0-1" }]);
+	});
+});
 
 describe("resolveConversation", () => {
 	it("resolves a session file inside the sessions folder", () => {

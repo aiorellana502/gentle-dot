@@ -40,7 +40,7 @@ describe("reduce", () => {
 	});
 
 	it("attaches activities to their message and updates them in place", () => {
-		const running = { id: "t1", kind: "read" as const, title: "Reading a.md", status: "running" as const };
+		const running = { id: "t1", kind: "read" as const, tool: "read" as const, title: "Reading a file", status: "running" as const };
 		let s = apply(initialState, { type: "activity", messageId: "m1", activity: running });
 		expect(s.messages[0]).toMatchObject({ role: "assistant", text: "", activities: [running] });
 		s = apply(s, { type: "activity", messageId: "m1", activity: { ...running, status: "done" } });

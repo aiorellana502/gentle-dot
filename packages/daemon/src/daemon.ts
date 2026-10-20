@@ -318,6 +318,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
+		workspace: options.workspace,
 		log,
 		auth,
 		profiles,

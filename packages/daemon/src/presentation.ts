@@ -1,5 +1,5 @@
-import { basename } from "node:path";
-import type { ActivityKind } from "@gentle-dot/protocol";
+import { ACTIVITY_TOOLS, type ActivityKind, type ActivityTool } from "@gentle-dot/protocol";
+import { safeRelativeTarget } from "./activity-target.ts";
 
 /** The life cycle of one tool call, as the activity list shows it. */
 export type ActivityStatus = "running" | "done" | "failed";
@@ -8,34 +8,38 @@ export type ActivityStatus = "running" | "done" | "failed";
 type Tense = readonly [running: string, done: string, failed: string];
 
 /**
- * Turns an internal tool call into a neutral activity. Tool names never reach
- * the user; only the kind and a short human title do. The title matches the
+ * Turns an internal tool call into a neutral activity with an optional fixed
+ * display identity. Arguments and targets never reach titles. The title matches the
  * call's status, so a finished or failed call never shows as still running.
  */
 export function describeTool(
 	toolName: string,
 	args: unknown,
 	status: ActivityStatus = "running",
-): { kind: ActivityKind; title: string } {
+	workspace?: string,
+): { kind: ActivityKind; title: string; tool?: ActivityTool; target?: string } {
 	const name = toolName.toLowerCase();
-	const file = fileOf(args);
-	const titled = (kind: ActivityKind, titles: Tense): { kind: ActivityKind; title: string } => ({
+	const tool = ACTIVITY_TOOLS.find((known) => known === name);
+	const fileArgs = args && typeof args === "object" && !Array.isArray(args)
+		? args as Record<string, unknown> : undefined;
+	const target = tool && ["read", "write", "edit"].includes(tool)
+		? safeRelativeTarget(workspace, fileArgs?.path ?? fileArgs?.file_path ?? fileArgs?.filePath)
+		: undefined;
+	const titled = (kind: ActivityKind, titles: Tense) => ({
 		kind,
+		...(tool ? { tool } : {}),
+		...(target ? { target } : {}),
 		title: status === "running" ? titles[0] : status === "done" ? titles[1] : titles[2],
 	});
 	if (name === "read")
 		return titled(
 			"read",
-			file
-				? ([`Reading ${file}`, `Read ${file}`, `Could not read ${file}`] as const)
-				: (["Reading a file", "Read a file", "Could not read a file"] as const),
+			["Reading a file", "Read a file", "Could not read a file"],
 		);
 	if (name === "write" || name === "edit")
 		return titled(
 			"edit",
-			file
-				? ([`Editing ${file}`, `Edited ${file}`, `Could not edit ${file}`] as const)
-				: (["Editing a file", "Edited a file", "Could not edit a file"] as const),
+			["Editing a file", "Edited a file", "Could not edit a file"],
 		);
 	if (name === "bash") return titled("run", ["Running a command", "Ran a command", "A command failed"]);
 	if (name.startsWith("mem_save") || name === "mem_update" || name === "mem_session_summary")
@@ -54,13 +58,6 @@ export function describeTool(
 		return titled("search", ["Searching files", "Searched files", "Could not search files"]);
 	if (name.startsWith("ask_user")) return titled("other", ["Asking you", "Asked you", "Could not ask you"]);
 	return titled("other", ["Working", "Finished", "Failed"]);
-}
-
-function fileOf(args: unknown): string | undefined {
-	if (typeof args !== "object" || args === null) return undefined;
-	const record = args as Record<string, unknown>;
-	const path = record.path ?? record.file_path ?? record.filePath;
-	return typeof path === "string" && path !== "" ? basename(path) : undefined;
 }
 
 /** Plain text of a user or assistant message whose content is a string or content blocks. */

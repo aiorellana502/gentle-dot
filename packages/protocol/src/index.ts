@@ -11,10 +11,23 @@ export type AgentState = "starting" | "idle" | "thinking" | "working" | "needs_y
 
 export type ActivityKind = "read" | "edit" | "run" | "search" | "memory" | "delegate" | "other";
 
+/** Fixed display identities; never arbitrary integration identifiers. */
+export const ACTIVITY_TOOLS = [
+	"read", "write", "edit", "bash", "grep", "find", "ls",
+	"mem_save", "mem_update", "mem_session_summary", "mem_search", "mem_context",
+	"mem_get_observation", "subagent_run", "web_search", "fetch_content",
+	"get_search_content", "source_check", "codegraph_query", "ask_user_choice",
+] as const;
+export type ActivityTool = (typeof ACTIVITY_TOOLS)[number];
+
 export interface Activity {
 	id: string;
 	kind: ActivityKind;
 	title: string;
+	/** Optional safe identity; older payloads have no identity. */
+	tool?: ActivityTool;
+	/** Optional interior workspace-relative logical file target, using forward slashes. */
+	target?: string;
 	status: "running" | "done" | "failed";
 }
 

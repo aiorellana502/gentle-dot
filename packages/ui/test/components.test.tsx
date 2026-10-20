@@ -99,6 +99,49 @@ describe("AskCard", () => {
 });
 
 describe("MessageList", () => {
+	it("shows safe relative file targets but rejects malformed display metadata", async () => {
+		const targets = ["src/app.ts", undefined, "/CANARY", "C:\\CANARY", "../CANARY", "//CANARY/share", "src/CANARY?x", "src/CANARY#x", "src/../CANARY", "src\\CANARY", "src/\nCANARY", ".", "C:CANARY"];
+		const activities = targets.map((target, i) => ({
+			id: String(i), kind: "read" as const, tool: "read" as const,
+			title: "CANARY raw title", target, status: "done" as const,
+		}));
+		activities.push({ ...activities[0]!, id: "unknown", tool: "connector_CANARY" as "read", target: "CANARY" });
+		const { container } = render(<MessageList messages={[
+			{ id: "m", role: "assistant", text: "A", streaming: false, activities },
+		]} />);
+		await userEvent.click(screen.getByRole("button", { name: /Read 14 files/ }));
+		expect(screen.getByText("read · src/app.ts · Completed")).toBeInTheDocument();
+		expect(screen.getAllByText("read · Completed")).toHaveLength(12);
+		expect(screen.getByText("Tool · Completed")).toBeInTheDocument();
+		expect(container.innerHTML).not.toContain("CANARY");
+	});
+
+	it("shows safe identity and textual outcomes without legacy title leakage", async () => {
+		const activities = [
+			{ id: "a", kind: "read" as const, title: "CANARY/path", tool: "read" as const, status: "running" as const },
+			{ id: "b", kind: "run" as const, title: "CANARY command", tool: "bash" as const, status: "done" as const },
+			{ id: "c", kind: "other" as const, title: "CANARY error", status: "failed" as const },
+		];
+		const { container, rerender } = render(<MessageList messages={[
+			{ id: "m", role: "assistant", text: "Answer", streaming: false, activities },
+		]} />);
+		const summary = screen.getByRole("button", { name: "Running" });
+		expect(summary).toHaveAttribute("aria-expanded", "false");
+		expect(container.innerHTML).not.toContain("CANARY");
+		summary.focus();
+		await userEvent.keyboard("{Enter}");
+		expect(summary).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getByText("read · Running")).toBeInTheDocument();
+		expect(screen.getByText("bash · Completed")).toBeInTheDocument();
+		expect(screen.getByText("Tool · Failed")).toBeInTheDocument();
+		rerender(<MessageList messages={[
+			{ id: "m", role: "assistant", text: "Answer", streaming: false,
+				activities: activities.map((a) => ({ ...a, status: "done" })) },
+		]} />);
+		expect(screen.getByRole("button", { name: "Read 1 file · Ran 1 command · Did 1 step" })).toHaveAttribute("aria-expanded", "true");
+		expect(screen.getAllByRole("listitem")).toHaveLength(3);
+		expect(container.innerHTML).not.toContain("CANARY");
+	});
 	it("renders Markdown and summarizes activities", async () => {
 		render(
 			<MessageList
@@ -121,8 +164,22 @@ describe("MessageList", () => {
 		expect(screen.getByText("good").tagName).toBe("STRONG");
 		const summary = screen.getByRole("button", { name: /Read 2 files · Ran 1 command/ });
 		await userEvent.click(summary);
-		expect(screen.getByText("Read b.md")).toBeInTheDocument();
-		expect(screen.getByText("A command failed")).toBeInTheDocument();
+		expect(screen.getAllByText("Tool · Completed")).toHaveLength(2);
+		expect(screen.getByText("Tool · Failed")).toBeInTheDocument();
+		expect(screen.queryByText("Read b.md")).not.toBeInTheDocument();
+	});
+
+	it("never renders arbitrary tool identities from old or malicious payloads", async () => {
+		const activities = ["connector_CANARY", "__proto__", "constructor", "READ"].map((tool, i) => ({
+			id: String(i), kind: "other" as const, title: "CANARY", status: "done" as const,
+			tool: tool as unknown as "read",
+		}));
+		const { container } = render(<MessageList messages={[
+			{ id: "m", role: "assistant", text: "A", streaming: false, activities },
+		]} />);
+		await userEvent.click(screen.getByRole("button", { name: "Did 4 steps" }));
+		expect(screen.getAllByText("Tool · Completed")).toHaveLength(4);
+		expect(container.innerHTML).not.toContain("CANARY");
 	});
 });
 

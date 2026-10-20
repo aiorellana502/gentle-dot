@@ -176,14 +176,29 @@ describe("gateway", () => {
 		expect(client.messages.filter((m) => m.type === "user_message")).toHaveLength(1);
 	});
 
+	it("limits live file targets to the trusted workspace", async () => {
+		for (const path of ["src/app.ts", "D:\\CANARY\\external.ts"]) {
+			const agent = join(tempDir(), "target-agent.ts");
+			writeFileSync(agent, readFileSync(FAKE_AGENT, "utf8").replace('path: "README.md"', `path: ${JSON.stringify(path)}`));
+			const client = await authed(await daemon(process.env, { agentArgs: [agent] }));
+			send(client, { type: "send", text: "tool:read" });
+			const started = await find(client, "activity", (m) => m.activity.status === "running");
+			if (path === "src/app.ts") expect(started.activity).toMatchObject({ target: path });
+			else expect(started.activity).not.toHaveProperty("target");
+			expect(JSON.stringify(started.activity)).not.toContain("CANARY");
+			await find(client, "message_done");
+		}
+	});
+
 	it("reports tool activity under the running answer", async () => {
 		const d = await daemon();
 		const client = await authed(d);
 		send(client, { type: "send", text: "tool:read" });
 		const done = await find(client, "activity", (m) => m.activity.status === "done");
-		expect(done.activity.kind).toBe("read");
+		expect(done.activity).toMatchObject({ kind: "read", tool: "read", title: "Read a file" });
 		const started = await find(client, "activity", (m) => m.activity.status === "running");
 		expect(started.messageId).toBe(done.messageId);
+		expect(started.activity).toEqual({ ...done.activity, title: "Reading a file", status: "running" });
 		await find(client, "agent_state", (m) => m.state === "working");
 	});
 

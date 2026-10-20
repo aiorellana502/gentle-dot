@@ -1,4 +1,4 @@
-import type { Activity, ActivityKind } from "@gentle-dot/protocol";
+import { ACTIVITY_TOOLS, type Activity, type ActivityKind } from "@gentle-dot/protocol";
 import { Fragment, useEffect, useRef, useState } from "react";
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -27,6 +27,22 @@ export function summarize(activities: Activity[]): string {
 		.join(" · ");
 }
 
+const OUTCOMES = { running: "Running", done: "Completed", failed: "Failed" } as const;
+
+function activityLabel(activity: Activity): string {
+	// Revalidate at the display boundary: old servers may send arbitrary titles/identities.
+	return ACTIVITY_TOOLS.find((tool) => tool === activity.tool) ?? "Tool";
+}
+
+/** Revalidate wire metadata without trusting legacy titles or absolute paths. */
+function activityTarget(activity: Activity): string {
+	const target = activity.target;
+	if (!["read", "write", "edit"].includes(activityLabel(activity))) return "";
+	if (typeof target !== "string" || !target.trim() || /[\\:?#\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069\u2028\u2029]/.test(target)) return "";
+	if (target.split("/").some((part) => !part || part === "." || part === "..")) return "";
+	return ` · ${target}`;
+}
+
 function Activities({ activities }: { activities: Activity[] }) {
 	const [open, setOpen] = useState(false);
 	const running = activities.find((a) => a.status === "running");
@@ -39,13 +55,13 @@ function Activities({ activities }: { activities: Activity[] }) {
 				onClick={() => setOpen(!open)}
 			>
 				<span className={running ? "pulse" : ""} aria-hidden="true" />
-				{running ? running.title : summarize(activities)}
+				{running ? "Running" : summarize(activities)}
 			</button>
 			{open ? (
 				<ul>
 					{activities.map((a) => (
 						<li key={a.id} className={`activity activity-${a.status}`}>
-							{a.title}
+							{activityLabel(a)}{activityTarget(a)} · {OUTCOMES[a.status]}
 						</li>
 					))}
 				</ul>
