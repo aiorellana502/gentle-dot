@@ -1,5 +1,5 @@
 import { randomBytes, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import {
 	type AgentState,
@@ -45,6 +45,7 @@ import {
 	toModelOptions,
 } from "./profiles.ts";
 import { DEFAULT_ROTATION, type RotationLimits, SessionRotator } from "./rotation.ts";
+import { mark } from "./startup-marks.ts";
 import type { AgentRecord, AgentSupervisor, SupervisorEvent } from "./supervisor.ts";
 import { composePrompt, type StoredFile, splitAttachments, type UploadStore } from "./uploads.ts";
 import type { VoiceService } from "./voice.ts";
@@ -1150,7 +1151,14 @@ export class DotBridge {
 			// The engine writes a message to its session file right after announcing it;
 			// one round trip makes sure everything announced so far is on disk.
 			await this.supervisor.request({ type: "get_state" });
-			const page = this.engine(() => pageHistory(this.chain(), this.pageSize(), undefined, this.options.workspace));
+			const chain = this.chain();
+			const page = this.engine(() =>
+				this.timedSync(
+					"page",
+					() => pageHistory(chain, this.pageSize(), undefined, this.options.workspace),
+					() => ({ files: chain.length, bytes: chain.reduce((sum, file) => sum + (existsSync(file) ? statSync(file).size : 0), 0) }),
+				),
+			);
 			if (this.nextMessage === seen || attempt >= 2) return page;
 		}
 	}
@@ -1168,7 +1176,9 @@ export class DotBridge {
 	private conversationsPayload(): ServerPayload {
 		return {
 			type: "conversations",
-			conversations: this.engine(() => listConversations(this.sessionDir)),
+			conversations: this.engine(() =>
+				this.timedSync("list", () => listConversations(this.sessionDir), (list) => ({ files: list.length })),
+			),
 			...this.activeRef(),
 		};
 	}
@@ -1402,6 +1412,23 @@ export class DotBridge {
 
 	private deliver(client: BridgeClient, payload: ServerPayload): void {
 		client.send(payload);
+	}
+
+	/**
+	 * Opt-in timing of history work that runs synchronously on the daemon's event loop, where a long
+	 * span stalls every client and `GET /health` alike. The mark lets the stall watchdog name it.
+	 * Counts and sizes only, never paths or contents.
+	 */
+	private timedSync<T>(op: "page" | "list", fn: () => T, size: (result: T) => { files: number; bytes?: number }): T {
+		if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS !== "1") return fn();
+		mark(`bridge.history.${op}`);
+		const started = performance.now();
+		const result = fn();
+		const durationMs = Math.round(performance.now() - started);
+		const { files, bytes } = size(result);
+		const sized = bytes === undefined ? "" : ` bytes=${bytes}`;
+		this.log(`[startup-diagnostics] history_sync op=${op} files=${files}${sized} duration_ms=${durationMs}`);
+		return result;
 	}
 
 	/** Runs `fn` on the engine's files as the engine's user (server mode). */

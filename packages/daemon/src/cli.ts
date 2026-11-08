@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { inheritedAppSocket, openNamedPipeChannel } from "./app-channel.ts";
 import { serveAuthHelper } from "./auth-helper.ts";
@@ -8,6 +9,8 @@ import { APPROVAL_GUARD, bundledMcpCli } from "./connectors.ts";
 import { startDaemon, startupMessage } from "./daemon.ts";
 import { resolveEngramBin, runtimeDir } from "./runtime.ts";
 import { SECRETS_KEY_VAR } from "./secret-file.ts";
+import { currentActivity, mark } from "./startup-marks.ts";
+import { authenticateThenProfile, startStartupProfile } from "./startup-profile.ts";
 import { loadVpsOptions } from "./vps.ts";
 import { IDENTITY_SOURCE } from "./white-label.ts";
 
@@ -38,12 +41,51 @@ function selfCheck(): void {
 }
 
 async function main(namedPipeSelection?: NamedPipeSelection): Promise<void> {
-	// A selected connection must succeed before configuration, spawning, or stdout output.
-	// Rejection reaches the fatal main catch; never fall back to an inherited descriptor.
-	const namedPipeChannel = namedPipeSelection
-		? await openNamedPipeChannel({ ...namedPipeSelection, log })
-		: undefined;
+	const started = Date.now();
+	const phase = (value: "entry" | "pipe_begin" | "pipe_ok" | "pipe_fail") => {
+		if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS === "1")
+			process.stderr.write(`[startup-diagnostics] bootstrap phase=${value} elapsed_ms=${Math.max(0, Date.now() - started)}\n`);
+	};
+	phase("entry");
+	// Authentication remains ahead of optional profiling, configuration and stdout.
+	const namedPipeChannel = await authenticateThenProfile(async () => {
+		mark("cli.pipe.connect");
+		if (!namedPipeSelection) return undefined;
+		phase("pipe_begin");
+		try {
+			const channel = await openNamedPipeChannel({ ...namedPipeSelection, log });
+			phase("pipe_ok");
+			return channel;
+		} catch (error) {
+			phase("pipe_fail");
+			throw error;
+		}
+	}, () => startStartupProfile(ENTRY));
+	mark("cli.config.load");
 	const config = loadConfig();
+	// Fixed diagnostics: an event loop that stops turning is invisible in every other signal, and it
+	// looks exactly like a dead daemon to `GET /health` (opt-in, one line per stall over 250 ms).
+	if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS === "1") {
+		const file = join(config.dataDir, "event-loop-lag.log");
+		let last = Date.now();
+		setInterval(() => {
+			const now = Date.now();
+			const lag = now - last - 100;
+			last = now;
+			if (lag > 250) {
+				const activity = currentActivity();
+				process.stderr.write(
+					`[startup-diagnostics] daemon stalled_ms=${lag} last_activity=${activity.name} activity_age_ms=${activity.ageMs}\n`,
+				);
+				try {
+					appendFileSync(
+						file,
+						`${new Date().toISOString()} stalled_ms=${lag} last_activity=${activity.name} activity_age_ms=${activity.ageMs}\n`,
+					);
+				} catch {}
+			}
+		}, 100).unref();
+	}
 	// The desktop app that launched the daemon hands over its private channel on fd 3 (S25.1); it is
 	// opened before anything is spawned, and refused if children would inherit it.
 	const appChannel = namedPipeSelection ? namedPipeChannel : inheritedAppSocket({ log });
@@ -51,6 +93,7 @@ async function main(namedPipeSelection?: NamedPipeSelection): Promise<void> {
 	// from the process environment, so no child the daemon starts can inherit it.
 	const vps = loadVpsOptions(process.env, { uid: process.getuid?.() ?? -1 });
 	delete process.env[SECRETS_KEY_VAR];
+	mark("cli.daemon.start");
 	const daemon = await startDaemon({
 		port: config.port,
 		host: config.host,

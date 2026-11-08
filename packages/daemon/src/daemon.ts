@@ -39,6 +39,7 @@ import { defaultImportPath, ProfileStore } from "./profiles.ts";
 import { type RotationLimits, rotationLimits } from "./rotation.ts";
 import { FileSecretSource, SECRETS_FILE, SECRETS_KEY_VAR } from "./secret-file.ts";
 import { AppSecretSource } from "./secret-source.ts";
+import { mark, markEntry, markHttp } from "./startup-marks.ts";
 import { AgentSupervisor } from "./supervisor.ts";
 import { UploadStore } from "./uploads.ts";
 import { VoiceService } from "./voice.ts";
@@ -153,6 +154,7 @@ export function startupMessage(url: string, dataDir: string, interactive: boolea
 
 export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	const log = options.log ?? (() => {});
+	mark("daemon.token");
 	const token = ensureToken(options.dataDir);
 	const vps = options.vps;
 	// Server mode (S25.8): the daemon's files stay its own, the engine's folders become the engine's,
@@ -164,6 +166,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	if (options.agentHome && resolve(options.agentHome) === resolve(options.dataDir, "agent"))
 		claimEngineHome(options.agentHome, log, access);
 	access(() => mkdirSync(options.workspace, { recursive: true, mode: 0o700 }));
+	mark("daemon.memory.project");
 	ensureMemoryProject(options.workspace, access);
 	const folderArgs = options.preferredFolder
 		? [
@@ -175,7 +178,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	// The server's secrets key is the daemon's only, whatever the engine is (S25.8).
 	delete agentEnv[SECRETS_KEY_VAR];
 	const homeArgs: string[] = [];
+	mark("daemon.memory.start");
 	const memory = options.agentHome ? await privateMemory(agentEnv, options.dataDir, log, access) : undefined;
+	mark("daemon.env");
 	if (options.agentHome) {
 		homeArgs.push("--home", options.agentHome);
 		// The engine also writes under the home folder; it gets one of its own.
@@ -194,6 +199,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 				: undefined;
 	// The approved connectors are read once, here; the engine cannot change them (docs/design.md).
 	// Their secrets come from the app's secure store over its channel, and only into memory (S25.5).
+	mark("daemon.store");
 	const connectorStore = new ConnectorStore({
 		dataDir: options.dataDir,
 		agentHome,
@@ -216,6 +222,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	});
 	// The engine reaches every connector through the proxy (S25.4); its key changes with every launch.
 	let port = options.port;
+	mark("daemon.proxy");
 	const proxy = new McpProxy({
 		connector: (id) => connectorStore.proxyView(id),
 		prepare: (id) => connectorStore.prepare(id),
@@ -237,6 +244,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 	connectorStore.onUpdated = () => proxy.sync();
 	// The assistant's own engine loads the approval guard for connector actions.
 	const guardArgs = options.agentHome ? ["-e", APPROVAL_GUARD] : [];
+	mark("daemon.supervisor");
 	const supervisor = new AgentSupervisor({
 		command: options.agentCommand,
 		args: [...(options.agentArgs ?? []), ...homeArgs],
@@ -316,6 +324,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		...(options.uploadLimits ? { limits: options.uploadLimits } : {}),
 	});
 	const historyPage = options.historyPage ?? Number(process.env.GENTLE_DOT_HISTORY_PAGE);
+	mark("daemon.bridge");
 	const bridge = new DotBridge(supervisor, {
 		dataDir: options.dataDir,
 		workspace: options.workspace,
@@ -336,12 +345,14 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 
 	// connectors.json as read at start is checked against its signature before anything rewrites it,
 	// watches it, or starts the engine (S25.6).
+	mark("daemon.integrity");
 	const integrity = connectorStore
 		.checkIntegrity()
 		.catch((error: Error) => log(`could not check connectors.json: ${error.message}`));
 	if (app) {
 		// Nothing the app asks changes connectors before connectors.json was checked (S25.6).
 		app.handler = async (method, params) => {
+			markEntry("app", method);
 			await integrity;
 			return appRequest(method, params, bridge, connectors, app);
 		};
@@ -361,7 +372,9 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			"no desktop app channel: connector changes and approvals are refused, and connectors that need a secret fail closed; to use them, stop this assistant and open the Gentle Dot app, which starts its own",
 		);
 
+	mark("daemon.server.create");
 	const server = createServer((req, res) => {
+		markHttp(req.url);
 		const { pathname } = new URL(req.url ?? "/", "http://localhost");
 		if (pathname === "/upload") {
 			void handleUpload(req, res, token, allowedOrigins(port, options), uploads);
@@ -373,6 +386,7 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		}
 		handleHttp(req, res, options.uiDir, bridge);
 	});
+	mark("daemon.wss");
 	const wss = new WebSocketServer({ noServer: true, maxPayload: 1024 * 1024 });
 
 	server.on("upgrade", (req, socket, head) => {
@@ -390,11 +404,13 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 		wss.handleUpgrade(req, socket, head, (ws) => acceptClient(ws, token, bridge));
 	});
 
+	mark("daemon.listen");
 	await new Promise<void>((done, fail) => {
 		server.once("error", fail);
 		server.listen(options.port, options.host, () => done());
 	});
 	port = (server.address() as AddressInfo).port;
+	mark("daemon.listening");
 
 	let stopped = () => {};
 	const closed = new Promise<void>((done) => {
@@ -441,13 +457,18 @@ export async function startDaemon(options: DaemonOptions): Promise<DotDaemon> {
 			.catch((error: Error) => log(`connector secrets were not moved: ${error.message}`));
 	// The files as the daemon writes them (an older version kept a hash), then watched.
 	if (!stopping) {
+		mark("daemon.connectors.enforce");
 		connectorStore.enforce(false);
+		mark("daemon.connectors.watch");
 		connectorStore.watch();
+		mark("daemon.engine.start");
 		await supervisor
 			.start()
 			.catch((error: Error) => log(`agent failed to start: ${error.message}; retrying`));
+		mark("daemon.engine.started");
 	}
 
+	mark("daemon.ready");
 	return {
 		port,
 		token,
