@@ -1,12 +1,13 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { AgentSupervisor } from "../src/supervisor.ts";
 import { fakeSupervisor, tempDir, waitFor } from "./helpers.ts";
 
 const running: AgentSupervisor[] = [];
 afterEach(async () => {
 	await Promise.all(running.splice(0).map((s) => s.stop()));
+	vi.unstubAllEnvs();
 });
 
 function track<T extends { supervisor: AgentSupervisor }>(value: T): T {
@@ -26,22 +27,30 @@ describe("AgentSupervisor", () => {
 		expect(supervisor.state).toBe("ready");
 	});
 
-	it("starts the agent as the configured user, and as the daemon's own user without one (S25.8)", async () => {
-		const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+	it("uses the daemon's own identity without forwarding ambient private variables (S25.8)", async () => {
+		vi.stubEnv("FAKE_PRIVATE_SECRET", "synthetic-canary");
 		const processFile = join(tempDir(), "process.json");
-		const env = { ...process.env, FAKE_AGENT_PROCESS_FILE: processFile };
-		// Without a user, the agent runs as the daemon does today.
-		const plain = track(fakeSupervisor({ env }));
+		const plain = track(fakeSupervisor({ env: { FAKE_AGENT_PROCESS_FILE: processFile } }));
 		await plain.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
-		await plain.supervisor.stop();
-		const as = track(fakeSupervisor({ env, user: own }));
+		const record = JSON.parse(readFileSync(processFile, "utf8"));
+		expect(record.uid).toBe(process.getuid?.());
+		expect(record.gid).toBe(process.getgid?.());
+		expect(Object.hasOwn(record.env, "FAKE_PRIVATE_SECRET")).toBe(false);
+		expect(plain.supervisor.state).toBe("ready");
+	});
+
+	it.skipIf(!process.getuid || !process.getgid)("starts as the configured POSIX user (S25.8)", async () => {
+		const own = { uid: process.getuid!(), gid: process.getgid!() };
+		const processFile = join(tempDir(), "process.json");
+		const as = track(fakeSupervisor({ env: { FAKE_AGENT_PROCESS_FILE: processFile }, user: own }));
 		await as.supervisor.start();
-		expect(JSON.parse(readFileSync(processFile, "utf8"))).toMatchObject(own);
+		const record = JSON.parse(readFileSync(processFile, "utf8"));
+		expect(record.uid).toBe(own.uid);
+		expect(record.gid).toBe(own.gid);
 		expect(as.supervisor.state).toBe("ready");
 	});
 
-	it.skipIf((process.getuid?.() ?? 0) === 0)(
+	it.skipIf(!process.getuid || !process.getgid || process.getuid() === 0)(
 		"applies the user to the spawn: one it cannot take is refused",
 		async () => {
 			const own = { uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
