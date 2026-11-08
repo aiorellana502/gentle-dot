@@ -10,25 +10,38 @@ upstream release or an endorsement by the original maintainers.
 
 **Preparation only: a clean-clone build and empty-profile first login have not
 been validated.** The owner's existing-profile chat worked on one Windows host;
-that does not establish fresh-install success. The pending commit-history secret
-review has no passing result, so publication remains blocked during preparation.
-Do not ask for, copy, upload or reuse the owner's profile or build cache.
+that does not establish fresh-install success. A bounded heuristic review of the
+outgoing commit history found no credential-pattern matches, but that is not an
+exhaustive security guarantee (no dedicated secret scanner was available), so
+publication remains blocked during preparation. Do not ask for, copy, upload or
+reuse the owner's profile or build cache.
 
 | Area | Current evidence / limit |
 | --- | --- |
 | Basic text chat and last conversation | Accepted manually on the original host/profile |
 | Separate preview launch environment | Eight isolated launcher tests passed independently; not a real first login |
 | Native pipe / startup recovery | Existing targeted tests; not a fresh-machine report |
-| Clean Windows setup | Not verified; prerequisite gaps below remain |
+| Clean Windows setup | Overall dependency installation failed in the isolated checkout; addon and desktop builds were not reached. A standalone Go build succeeded, but does not validate the full workflow |
 | Voice, computer control, connectors, tools, private memory | Not validated for this preview |
 | Windows installers / portable binaries | Not provided by this workflow |
 
 ## Prepare source dependencies
 
 Use a Windows x64 development terminal with Node.js 24+, pnpm 11.5.0, stable
-Rust MSVC, Visual Studio C++ build tools / Windows SDK and WebView2 available.
+Rust MSVC, Visual Studio C++ build tools / Windows SDK and WebView2 available,
+and a real Go 1.25.10+ toolchain on `PATH` (`go version`): `gentle-pi`'s
+postinstall builds the bundled `gentle-ai` engine from source via Go's module
+proxy/SumDB on Windows, since no signed Windows release is published yet.
 The assistant can execute commands and access files: use a disposable test
 workspace/account, not sensitive documents or a production environment.
+
+**Known unresolved installation failure:** in the deeply nested validation
+checkout, Go reported `The directory name is invalid.` while invoking `asm.exe`.
+Path depth is a hypothesis, not a demonstrated root cause or a verified workaround.
+A separate Go build succeeded; the actual `gentle-pi` postinstall still failed.
+Do not change Windows system settings or treat an existing binary as clean-build
+validation. The fresh-profile GUI also showed a black panel with
+`the assistant did not answer on port 4417`; this remains unresolved.
 
 Once the preview commits are actually published, obtain the source with:
 
