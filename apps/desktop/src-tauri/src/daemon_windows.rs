@@ -2,14 +2,18 @@
 //! Foreign daemons are refused, never adopted or terminated. Orphan recovery is not supported.
 
 use crate::app_channel::{AppChannel, Handler};
-use crate::health::check_health;
+use crate::health::{check_health, probe_health};
 use crate::isolated_bootstrap_windows::ServerEndpoint;
 use crate::owned_process_windows::{current_process_identity, OwnedProcess};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+/// Distinguishes concurrent `wait_ready` invocations in the diagnostics stream.
+static WAIT_CALLS: AtomicU64 = AtomicU64::new(0);
 
 const HEALTH_TIMEOUT: Duration = Duration::from_millis(300);
 /// Owned startup has a separate bounded budget from a window's connection request.
@@ -90,7 +94,7 @@ struct Owned {
 impl Drop for Owned {
     fn drop(&mut self) {
         if let Some(channel) = self.channel.take() {
-            channel.close();
+            channel.shutdown("owner_dropped");
         }
         self.child.take();
     }
@@ -163,6 +167,21 @@ impl Daemon {
             return None;
         }
         owned.channel.clone().filter(|channel| channel.is_open())
+    }
+
+    /// Diagnostic only: which of `channel()`'s three conditions hold right now.
+    fn channel_snapshot(&self) -> (bool, bool, bool) {
+        let owned = self.owned.lock().unwrap();
+        let running = owned
+            .child
+            .as_ref()
+            .is_some_and(|child| matches!(child.0.wait(0), Ok(None)));
+        let slot = owned.channel.is_some();
+        let open = owned
+            .channel
+            .as_ref()
+            .is_some_and(|channel| channel.is_open());
+        (running, slot, open)
     }
 
     pub fn owns_running(&self) -> bool {
@@ -264,6 +283,9 @@ impl Daemon {
         ));
         let child = ChildOwner(OwnedProcess::spawn(&spec.program, &args, &envs).map_err(
             |error| {
+                if startup_diagnostics() {
+                    eprintln!("[startup-diagnostics] native phase=spawn_error child_state=unknown elapsed_ms={}", started.elapsed().as_millis());
+                }
                 context(
                     "cannot start the assistant (GENTLE_DOT_NODE must name an absolute executable)",
                     error,
@@ -282,7 +304,15 @@ impl Daemon {
         phase("auth_wait");
         let verified = endpoint
             .accept_owned(identity, deadline)
-            .map_err(|error| context("cannot authenticate the assistant's channel", error))?;
+            .map_err(|error| {
+                // This observation must precede ChildOwner::drop terminating the owned job.
+                if startup_diagnostics() {
+                    let state = child_state(child.0.wait(0));
+                    let phase = auth_failure_phase(error.kind());
+                    eprintln!("[startup-diagnostics] native phase={phase} child_state={state} elapsed_ms={}", started.elapsed().as_millis());
+                }
+                context("cannot authenticate the assistant's channel", error)
+            })?;
         phase("authenticated");
         let (reader, writer) = verified
             .into_duplex()
@@ -314,18 +344,38 @@ impl Daemon {
     pub fn wait_ready(&self, timeout: Duration) -> Result<(), String> {
         let started = Instant::now();
         let enabled = startup_diagnostics();
+        let call = WAIT_CALLS.fetch_add(1, Ordering::SeqCst) + 1;
         let mut previous = None;
-        if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_entry budget_ms={}", timeout.as_millis()); }
+        if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_entry call={call} budget_ms={}", timeout.as_millis()); }
         loop {
             if let Some(reason) = self.refusal() {
                 if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_refused elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err(reason);
             }
             let channel = self.channel().is_some();
-            let healthy = if channel { Some(self.is_healthy()) } else { None };
-            if enabled && previous != Some((channel, healthy)) {
-                eprintln!("[startup-diagnostics] native phase=wait_ready_gate channel_authenticated_open={channel} http_healthy={} elapsed_ms={}", match healthy { Some(true) => "true", Some(false) => "false", None => "NOT_EVALUATED" }, started.elapsed().as_millis());
-                previous = Some((channel, healthy));
+            let probe = if channel && enabled {
+                Some(probe_health(self.port, HEALTH_TIMEOUT))
+            } else {
+                None
+            };
+            let healthy = if channel {
+                Some(probe.map_or_else(|| self.is_healthy(), |probe| probe.ok))
+            } else {
+                None
+            };
+            if enabled {
+                let snapshot = self.channel_snapshot();
+                let key = (
+                    channel,
+                    healthy,
+                    snapshot,
+                    probe.map(|probe| (probe.failure, probe.status)),
+                );
+                if previous != Some(key) {
+                    let (running, slot, open) = snapshot;
+                    eprintln!("[startup-diagnostics] native phase=wait_ready_gate call={call} child_running={running} channel_slot={slot} channel_open={open} channel_authenticated_open={channel} http_healthy={} probe_failure={} probe_status={} probe_ms={} elapsed_ms={}", match healthy { Some(true) => "true", Some(false) => "false", None => "NOT_EVALUATED" }, probe.map_or("none", |probe| probe.failure), probe.map_or(0, |probe| probe.status), probe.map_or(0, |probe| probe.elapsed_ms), started.elapsed().as_millis());
+                    previous = Some(key);
+                }
             }
             if healthy == Some(true) {
                 if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_success elapsed_ms={}", started.elapsed().as_millis()); }
@@ -421,6 +471,19 @@ impl Daemon {
     }
 }
 
+// Classify only the returned failure kind; child exit is a separate pre-cleanup snapshot.
+fn auth_failure_phase(kind: io::ErrorKind) -> &'static str {
+    if kind == io::ErrorKind::TimedOut { "auth_timeout" } else { "auth_error" }
+}
+
+fn child_state(result: io::Result<Option<u32>>) -> &'static str {
+    match result {
+        Ok(None) => "running",
+        Ok(Some(_)) => "exited",
+        Err(_) => "unknown",
+    }
+}
+
 fn startup_diagnostics() -> bool {
     std::env::var_os("GENTLE_DOT_STARTUP_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1"))
 }
@@ -451,6 +514,19 @@ mod tests {
     use windows_sys::Win32::Storage::FileSystem::*;
     use windows_sys::Win32::System::Pipes::GetNamedPipeServerProcessId;
     use windows_sys::Win32::System::Threading::*;
+
+    #[test]
+    fn windows_daemon_failure_diagnostics_classify_without_raw_data() {
+        assert_eq!(auth_failure_phase(io::ErrorKind::TimedOut), "auth_timeout");
+        for kind in [io::ErrorKind::PermissionDenied, io::ErrorKind::BrokenPipe, io::ErrorKind::Other] {
+            assert_eq!(auth_failure_phase(kind), "auth_error");
+        }
+        assert_eq!(child_state(Ok(None)), "running");
+        assert_eq!(child_state(Ok(Some(0))), "exited");
+        assert_eq!(child_state(Ok(Some(123))), "exited");
+        assert_eq!(child_state(Err(io::Error::other("CANARY"))), "unknown");
+        assert_eq!(BOOTSTRAP_MS, 5000);
+    }
 
     #[derive(Default)]
     struct Opened(AtomicUsize, Mutex<std::sync::Weak<AppChannel>>);

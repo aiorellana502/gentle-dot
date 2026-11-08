@@ -20,6 +20,7 @@ pub mod health;
 mod isolated_bootstrap_windows;
 #[cfg(target_os = "windows")]
 mod owned_process_windows;
+mod panel_startup_diagnostics;
 pub mod platform;
 pub mod position;
 pub mod secure_store;

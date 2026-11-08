@@ -183,15 +183,29 @@ async fn connector_command(app: AppHandle, client_id: String, message: serde_jso
 /// This window's 20 s wait does not cancel bounded owned Windows startup; the windows
 /// ask again on [`ASSISTANT_READY`] when that startup succeeds.
 #[tauri::command]
-async fn connection_info(app: AppHandle) -> CommandResult<ConnectionInfo> {
+async fn connection_info(
+    app: AppHandle,
+    window: WebviewWindow,
+    source: Option<crate::panel_startup_diagnostics::Source>,
+) -> CommandResult<ConnectionInfo> {
+    use crate::panel_startup_diagnostics::{Attempt, Window};
+    let window = match window.label() {
+        PANEL => Window::Panel,
+        DOT => Window::Dot,
+        _ => Window::Other,
+    };
+    let attempt = Attempt::begin(window, source.unwrap_or_default());
     let shell = app.state::<Shell>();
     let (config, daemon) = (shell.config.clone(), shell.daemon.clone());
-    tauri::async_runtime::spawn_blocking(move || {
+    let result = tauri::async_runtime::spawn_blocking(move || {
         daemon.wait_ready(DAEMON_START_TIMEOUT)?;
         read_connection_info(&config)
     })
     .await
-    .map_err(err)?
+    .map_err(err)
+    .and_then(|result| result);
+    attempt.finish(result.is_ok());
+    result
 }
 
 #[tauri::command]
@@ -800,7 +814,9 @@ pub fn run() {
                 Daemon::new(config.port, config.data_dir.clone(), runtime_dir)
                     .with_channel(Arc::new(service))
                     .on_ready(Arc::new(move || {
-                        if let Err(error) = announcer.emit(ASSISTANT_READY, ()) {
+                        let result = announcer.emit(ASSISTANT_READY, ());
+                        crate::panel_startup_diagnostics::ready_emitted(result.is_ok());
+                        if let Err(error) = result {
                             eprintln!("gentle-dot: cannot tell the windows the assistant is ready: {error}");
                         }
                     })),

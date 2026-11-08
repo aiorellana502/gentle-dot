@@ -220,7 +220,7 @@ impl AppChannel {
             .name("app-channel".into())
             .spawn(move || reading.read(handler))
         {
-            channel.close();
+            channel.shutdown("thread_unavailable");
             return Err(error);
         }
         Ok(channel)
@@ -326,6 +326,16 @@ impl AppChannel {
         .map(|_| ())
     }
 
+    /// Closes the channel and records a fixed reason when startup diagnostics are enabled.
+    pub(crate) fn shutdown(&self, reason: &'static str) {
+        if std::env::var_os("GENTLE_DOT_STARTUP_DIAGNOSTICS").as_deref()
+            == Some(std::ffi::OsStr::new("1"))
+        {
+            eprintln!("[startup-diagnostics] native phase=channel_closed reason={reason}");
+        }
+        self.close();
+    }
+
     pub fn close(&self) {
         self.open.store(false, Ordering::SeqCst);
         for (_, reply) in self.pending().drain() {
@@ -380,7 +390,7 @@ impl AppChannel {
         }
         // Revoke before permitting any later frame after potentially partial I/O.
         if writing {
-            self.close();
+            self.shutdown("expire_while_writing");
         }
     }
 
@@ -482,7 +492,13 @@ impl AppChannel {
                 || *state == Transmission::Expired
                 || Instant::now() >= outgoing.deadline
             {
-                self.close();
+                self.shutdown(if result.is_err() {
+                    "write_error"
+                } else if *state == Transmission::Expired {
+                    "write_expired"
+                } else {
+                    "write_late"
+                });
             } else {
                 *state = Transmission::Sent;
             }
@@ -553,7 +569,7 @@ impl AppChannel {
                 }
             }
         }
-        self.close();
+        self.shutdown("reader_exit");
         self.reader
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
