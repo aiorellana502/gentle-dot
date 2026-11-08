@@ -8,7 +8,7 @@ use crate::owned_process_windows::{current_process_identity, OwnedProcess};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -100,13 +100,22 @@ impl Drop for Owned {
     }
 }
 
+struct StopRequest<'a>(&'a AtomicUsize);
+
+impl Drop for StopRequest<'_> {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
 pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
     lifecycle: Mutex<()>,
-    // Set by stop before it waits for lifecycle, so a pending owned startup ends instead of
-    // holding the lock (and the quitting main thread) for its whole readiness budget.
-    stopping: AtomicBool,
+    // Pending stop requests, raised by stop before it waits for lifecycle, so a pending owned
+    // startup ends instead of holding the lock (and the quitting main thread) for its whole
+    // readiness budget. A count, so one finished stop never clears another one still waiting.
+    stopping: AtomicUsize,
     owned: Mutex<Owned>,
     handler: Option<Arc<dyn Handler>>,
     ready: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -125,7 +134,7 @@ impl Daemon {
             port,
             data_dir,
             lifecycle: Mutex::new(()),
-            stopping: AtomicBool::new(false),
+            stopping: AtomicUsize::new(0),
             owned: Mutex::new(Owned::default()),
             handler: None,
             ready: None,
@@ -356,7 +365,7 @@ impl Daemon {
                 if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_refused elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err(reason);
             }
-            if self.stopping.load(Ordering::SeqCst) {
+            if self.stopping.load(Ordering::SeqCst) > 0 {
                 if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_stopped elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err("the app stopped the assistant before it was ready".into());
             }
@@ -451,10 +460,15 @@ impl Daemon {
 
     /// Closes the owned channel and terminates only this instance's owned job.
     pub fn stop(&self) {
-        self.stopping.store(true, Ordering::SeqCst);
+        let _request = self.request_stop();
         let _lifecycle = self.lifecycle.lock().unwrap();
         self.stop_owned();
-        self.stopping.store(false, Ordering::SeqCst);
+    }
+
+    /// Registers a stop request until the returned guard drops.
+    fn request_stop(&self) -> StopRequest<'_> {
+        self.stopping.fetch_add(1, Ordering::SeqCst);
+        StopRequest(&self.stopping)
     }
 
     fn stop_owned(&self) {
@@ -891,6 +905,25 @@ mod tests {
         assert!(!daemon.owns_running());
         assert!(daemon.channel().is_none());
         assert_eq!(ready.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            daemon.wait_ready(Duration::ZERO),
+            Err("the assistant did not answer on port 1".into())
+        );
+    }
+
+    #[test]
+    fn windows_daemon_one_stop_never_clears_another_pending_stop() {
+        let daemon = Daemon::new(1, PathBuf::new(), None)
+            .with_channel(Arc::new(Opened::default()))
+            .with_health(Arc::new(|| false));
+        let first = daemon.request_stop();
+        let second = daemon.request_stop();
+        drop(first);
+        assert_eq!(
+            daemon.wait_ready(Duration::ZERO),
+            Err("the app stopped the assistant before it was ready".into())
+        );
+        drop(second);
         assert_eq!(
             daemon.wait_ready(Duration::ZERO),
             Err("the assistant did not answer on port 1".into())
