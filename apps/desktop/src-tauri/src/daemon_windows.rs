@@ -8,7 +8,7 @@ use crate::owned_process_windows::{current_process_identity, OwnedProcess};
 use std::ffi::OsString;
 use std::io;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -104,6 +104,9 @@ pub struct Daemon {
     port: u16,
     data_dir: PathBuf,
     lifecycle: Mutex<()>,
+    // Set by stop before it waits for lifecycle, so a pending owned startup ends instead of
+    // holding the lock (and the quitting main thread) for its whole readiness budget.
+    stopping: AtomicBool,
     owned: Mutex<Owned>,
     handler: Option<Arc<dyn Handler>>,
     ready: Option<Arc<dyn Fn() + Send + Sync>>,
@@ -122,6 +125,7 @@ impl Daemon {
             port,
             data_dir,
             lifecycle: Mutex::new(()),
+            stopping: AtomicBool::new(false),
             owned: Mutex::new(Owned::default()),
             handler: None,
             ready: None,
@@ -352,6 +356,10 @@ impl Daemon {
                 if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_refused elapsed_ms={}", started.elapsed().as_millis()); }
                 return Err(reason);
             }
+            if self.stopping.load(Ordering::SeqCst) {
+                if enabled { eprintln!("[startup-diagnostics] native phase=wait_ready_stopped elapsed_ms={}", started.elapsed().as_millis()); }
+                return Err("the app stopped the assistant before it was ready".into());
+            }
             let channel = self.channel().is_some();
             let probe = if channel && enabled {
                 Some(probe_health(self.port, HEALTH_TIMEOUT))
@@ -443,8 +451,10 @@ impl Daemon {
 
     /// Closes the owned channel and terminates only this instance's owned job.
     pub fn stop(&self) {
+        self.stopping.store(true, Ordering::SeqCst);
         let _lifecycle = self.lifecycle.lock().unwrap();
         self.stop_owned();
+        self.stopping.store(false, Ordering::SeqCst);
     }
 
     fn stop_owned(&self) {
@@ -842,6 +852,49 @@ mod tests {
         assert_eq!(ready.load(Ordering::SeqCst), 1);
         daemon.stop();
         assert!(!daemon.owns_running());
+    }
+
+    #[test]
+    fn windows_daemon_stop_cancels_pending_owned_startup() {
+        let ready = Arc::new(AtomicUsize::new(0));
+        let announced = ready.clone();
+        let daemon = Arc::new(
+            Daemon::new(1, PathBuf::new(), None)
+                .with_channel(Arc::new(Opened::default()))
+                .with_launch(fixture_spec("echo"))
+                .with_health(Arc::new(|| false))
+                .on_ready(Arc::new(move || {
+                    announced.fetch_add(1, Ordering::SeqCst);
+                })),
+        );
+        let starter = daemon.clone();
+        let start = std::thread::spawn(move || starter.ensure_running(Duration::from_secs(20)));
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while daemon.channel().is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "owned fixture did not authenticate"
+            );
+            std::thread::yield_now();
+        }
+        let stopping = Instant::now();
+        daemon.stop();
+        assert!(
+            stopping.elapsed() < Duration::from_secs(3),
+            "stop waited {:?} for the pending startup",
+            stopping.elapsed()
+        );
+        assert_eq!(
+            start.join().unwrap(),
+            Err("the app stopped the assistant before it was ready".into())
+        );
+        assert!(!daemon.owns_running());
+        assert!(daemon.channel().is_none());
+        assert_eq!(ready.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            daemon.wait_ready(Duration::ZERO),
+            Err("the assistant did not answer on port 1".into())
+        );
     }
 
     #[test]
