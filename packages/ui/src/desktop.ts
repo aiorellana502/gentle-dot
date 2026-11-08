@@ -5,8 +5,12 @@ import type { ConnectionInfo } from "./client.ts";
 /** Bridge to the Tauri shell (docs/design.md §9). Every call is a no-op in the browser. */
 export const inDesktop = (): boolean => isTauri();
 
-export function connectionInfo(): Promise<ConnectionInfo> {
-	return invoke<ConnectionInfo>("connection_info");
+export type ConnectionSource = "initial" | "listener_recheck" | "assistant_ready";
+
+export function connectionInfo(source?: ConnectionSource): Promise<ConnectionInfo> {
+	return source === undefined
+		? invoke<ConnectionInfo>("connection_info")
+		: invoke<ConnectionInfo>("connection_info", { source });
 }
 
 /**

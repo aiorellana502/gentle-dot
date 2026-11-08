@@ -1,5 +1,7 @@
+import { listen } from "@tauri-apps/api/event";
 import { act, cleanup, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { App } from "../src/App.tsx";
 import type { ConnectionInfo } from "../src/client.ts";
 import { type DotState, initialState } from "../src/store.ts";
 
@@ -22,8 +24,10 @@ vi.mock("@tauri-apps/api/core", () => ({
 	invoke: (command: string, args?: unknown) => h.invoke(command, args),
 }));
 
+// Initialize the event mock during collection, before panel/computer effects can
+// concurrently import it. A real listen would call Tauri's absent transformCallback.
 vi.mock("@tauri-apps/api/event", () => ({
-	listen: async () => () => {},
+	listen: vi.fn(async () => () => {}),
 }));
 
 vi.mock("../src/desktop.ts", async (importOriginal) => ({
@@ -46,9 +50,10 @@ const REFUSAL =
 	"Another Gentle Dot assistant is already running on port 4317. Stop it, then choose Restart assistant.";
 const INFO: ConnectionInfo = { url: "ws://127.0.0.1:4317/ws", token: "abc" };
 
+// Cold App dependency loading belongs to collection, not the first render's
+// five-second behavioral test. A timed-out late import can otherwise render after cleanup.
 async function renderApp(search: string) {
 	window.history.replaceState(null, "", `/${search}`);
-	const { App } = await import("../src/App.tsx");
 	return render(<App />);
 }
 
@@ -60,6 +65,7 @@ async function reportReady() {
 }
 
 beforeEach(() => {
+	expect(vi.isMockFunction(listen)).toBe(true);
 	h.listeners.clear();
 	h.registration = undefined;
 	h.infos = [];
@@ -81,6 +87,27 @@ afterEach(() => {
 });
 
 describe("after the app refused its assistant (S35.2)", () => {
+	it("keeps legacy no-argument callers compatible", async () => {
+		const { connectionInfo } = await import("../src/desktop.ts");
+		h.connection = async () => INFO;
+		expect(await connectionInfo()).toEqual(INFO);
+		expect(h.invoke).toHaveBeenCalledWith("connection_info", undefined);
+	});
+
+	it("labels initial, post-listener, and received-ready attempts in source order", async () => {
+		let registered!: () => void;
+		h.registration = new Promise<void>((resolve) => { registered = resolve; });
+		await renderApp("?surface=panel");
+		await screen.findByText(REFUSAL);
+		const args = () => h.invoke.mock.calls.filter(([c]) => c === "connection_info").map(([, a]) => a);
+		expect(args()).toEqual([{ source: "initial" }]);
+		await act(async () => registered());
+		await waitFor(() => expect(args()).toEqual([{ source: "initial" }, { source: "listener_recheck" }]));
+		await reportReady();
+		expect(args()).toEqual([{ source: "initial" }, { source: "listener_recheck" }, { source: "assistant_ready" }]);
+		expect(h.infos.every((info) => info === undefined)).toBe(true);
+		expect(screen.getByText(REFUSAL)).toHaveAttribute("role", "status");
+	});
 	it("keeps the opaque panel fallback on native startup failure", async () => {
 		const timeout = "the assistant did not answer on port 4417";
 		h.connection = async () => { throw timeout; };

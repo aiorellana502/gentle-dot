@@ -7,6 +7,7 @@ import { DotSurface } from "./components/DotSurface.tsx";
 import { GlowSurface } from "./components/GlowSurface.tsx";
 import { computerPermissions, requestComputerPermission, setComputerYolo, stopComputer } from "./computer.ts";
 import {
+	type ConnectionSource,
 	connectionInfo,
 	connectorCommand,
 	hidePanel,
@@ -107,10 +108,10 @@ function Assistant({ surface }: { surface: Surface }) {
 		if (inDesktop()) {
 			let live = true;
 			let request = 0;
-			const connect = () => {
+			const connect = (source: ConnectionSource) => {
 				if (!live) return Promise.resolve();
 				const currentRequest = ++request;
-				return connectionInfo().then(
+				return connectionInfo(source).then(
 					(next) => {
 						if (!live || currentRequest !== request) return;
 						// The same assistant keeps its connection; only a new one replaces it.
@@ -130,10 +131,10 @@ function Assistant({ surface }: { surface: Surface }) {
 			};
 			// A refused or timed-out window recovers without a reopen: the app reports its assistant
 			// ready after Restart assistant, or after a start slower than `connection_info` waits (S35.2).
-			const ready = onDesktopEvent("dot://assistant-ready", () => void connect());
-			void connect();
+			const ready = onDesktopEvent("dot://assistant-ready", () => void connect("assistant_ready"));
+			void connect("initial");
 			// Registration is asynchronous: recheck once subscribed to close the missed-event gap.
-			void ready.then(() => connect());
+			void ready.then(() => connect("listener_recheck"));
 			return () => {
 				live = false;
 				void ready.then((unlisten) => unlisten());
