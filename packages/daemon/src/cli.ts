@@ -44,23 +44,28 @@ async function main(namedPipeSelection?: NamedPipeSelection): Promise<void> {
 	const started = Date.now();
 	const phase = (value: "entry" | "pipe_begin" | "pipe_ok" | "pipe_fail") => {
 		if (process.env.GENTLE_DOT_STARTUP_DIAGNOSTICS === "1")
-			process.stderr.write(`[startup-diagnostics] bootstrap phase=${value} elapsed_ms=${Math.max(0, Date.now() - started)}\n`);
+			process.stderr.write(
+				`[startup-diagnostics] bootstrap phase=${value} elapsed_ms=${Math.max(0, Date.now() - started)}\n`,
+			);
 	};
 	phase("entry");
 	// Authentication remains ahead of optional profiling, configuration and stdout.
-	const namedPipeChannel = await authenticateThenProfile(async () => {
-		mark("cli.pipe.connect");
-		if (!namedPipeSelection) return undefined;
-		phase("pipe_begin");
-		try {
-			const channel = await openNamedPipeChannel({ ...namedPipeSelection, log });
-			phase("pipe_ok");
-			return channel;
-		} catch (error) {
-			phase("pipe_fail");
-			throw error;
-		}
-	}, () => startStartupProfile(ENTRY));
+	const namedPipeChannel = await authenticateThenProfile(
+		async () => {
+			mark("cli.pipe.connect");
+			if (!namedPipeSelection) return undefined;
+			phase("pipe_begin");
+			try {
+				const channel = await openNamedPipeChannel({ ...namedPipeSelection, log });
+				phase("pipe_ok");
+				return channel;
+			} catch (error) {
+				phase("pipe_fail");
+				throw error;
+			}
+		},
+		() => startStartupProfile(ENTRY),
+	);
 	mark("cli.config.load");
 	const config = loadConfig();
 	// Fixed diagnostics: an event loop that stops turning is invisible in every other signal, and it
