@@ -2,7 +2,8 @@
 
 For a separate contributor profile, use the
 [Windows contributor preview](windows-contributor-preview.md), not this owner's
-preserved-profile launcher. The offline build prerequisites below still apply.
+preserved-profile launcher. That guide provides a separate online source-build
+reference; the offline prerequisites below apply only to this existing-cache helper.
 
 Build once, then double-click `scripts/windows/local-launch.cmd`. Opening never
 builds, installs dependencies, starts Vite, or changes the selected login profile.
@@ -60,11 +61,18 @@ normal launcher. Never share ordinary logs as if they were sanitized traces.
 
 ## Validation scope
 
-The user confirmed the existing last conversation appeared and basic chat worked
-in the supervised, instrumented build, with Vite off. Standalone `.cmd` quoting
-was tested with synthetic fixtures, not a second real cold-start GUI replay.
-The earlier intermittent black-panel/port-4417 failure did not prevent this
-accepted run, but its cause has not been demonstrated. Repeated cold starts,
-tools, voice and connectors were not validated by this acceptance.
+The refreshed existing-workspace offline build succeeded; human checks accepted
+ordinary chat, the same conversation after normal Quit/reopen, and the requested
+early tray-Quit scenario. Visible immediate closure and a normal exit were
+observed, not measured Quit latency or independently proven pending readiness.
+Standalone `.cmd` quoting was tested with synthetic fixtures, not a second-host
+GUI replay.
+
+Separately, an isolated-source install/build and later new-profile login/chat/history
+succeeded on this same host. The first fresh-profile opening failed with a black
+panel/port-4417 error; later success does not explain it or establish reliable
+cold starts. See the [validation report](windows-preview-validation.md) for original
+failures and security-review limits. Tools, voice and connectors remain outside
+this acceptance; independent-machine validation is pending.
 If a startup warning returns, keep the profile intact and report the exact message;
 do not reset it or repeat login as a workaround.

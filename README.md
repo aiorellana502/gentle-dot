@@ -4,6 +4,10 @@
 > This branch is experimental, not an upstream Windows release or installer.
 > Start with the [Windows contributor guide](docs/windows-contributor-preview.md)
 > for source prerequisites, a separate test profile, known gaps, and contribution steps.
+> [Validation evidence](docs/windows-preview-validation.md): same-host source build
+> and later new-profile chat/history succeeded; first cold-start reliability and
+> second-machine acceptance remain unproven. A bounded pattern-based audit of the
+> published history found only test fixtures; no dedicated scanner or security clearance is claimed.
 > The project description below is upstream documentation; it is not a list of
 > Windows features verified by this fork. Original MIT attribution is retained.
 
