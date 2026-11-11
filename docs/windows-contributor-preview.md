@@ -69,10 +69,22 @@ than installing or copying it implicitly.
 ```powershell
 $ErrorActionPreference = 'Stop'
 $root = (Get-Location).Path
-$pnpm = (Get-Command pnpm.cmd).Source
+# Standalone pnpm installs expose pnpm.exe; npm/Corepack installs expose pnpm.cmd.
+$pnpm = (Get-Command pnpm.cmd, pnpm.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
+if (!$pnpm) { throw 'Missing pnpm' }
+if ((& $pnpm --version) -ne '11.5.0') { throw 'pnpm 11.5.0 is required (repository pin)' }
 $node = (Get-Command node.exe).Source
 $rust = Join-Path $env:USERPROFILE '.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin'
 if (!(Test-Path "$rust/cargo.exe") -or !(Test-Path "$rust/rustc.exe")) { throw 'Missing stable MSVC Rust' }
+# Cargo also reads .cargo/config.toml from every ancestor directory, even with an
+# isolated CARGO_HOME; a source replacement there would make the build non-fresh.
+$dir = Split-Path $root -Parent
+while ($dir) {
+  if ((Test-Path "$dir/.cargo/config.toml") -or (Test-Path "$dir/.cargo/config")) {
+    throw "Ancestor Cargo config at $dir/.cargo; move the checkout or report it"
+  }
+  $dir = Split-Path $dir -Parent
+}
 $state = Join-Path $root '.cache/windows-local'
 if (Test-Path $state) { throw 'Use a new checkout; do not overwrite existing build state' }
 New-Item -ItemType Directory -Path $state | Out-Null
@@ -142,7 +154,7 @@ icons remain in the new ignored directory. The addon generates `index.js` and
 ### 3. Build the embedded-UI desktop, without bundling
 
 Use an explicit UTF-8 **without BOM** config file: inline JSON can lose quoting
-through PowerShell / `pnpm.cmd`. Keep the tracked relative `frontendDist`;
+through PowerShell / pnpm. Keep the tracked relative `frontendDist`;
 do not replace it with an absolute Windows path or frontend URL.
 
 ```powershell
