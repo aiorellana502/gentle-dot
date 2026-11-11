@@ -70,9 +70,11 @@ than installing or copying it implicitly.
 $ErrorActionPreference = 'Stop'
 $root = (Get-Location).Path
 # Standalone pnpm installs expose pnpm.exe; npm/Corepack installs expose pnpm.cmd.
-$pnpm = (Get-Command pnpm.cmd, pnpm.exe -ErrorAction SilentlyContinue | Select-Object -First 1).Source
-if (!$pnpm) { throw 'Missing pnpm' }
-if ((& $pnpm --version) -ne '11.5.0') { throw 'pnpm 11.5.0 is required (repository pin)' }
+# Pick the first one on PATH that reports the pinned version.
+$pnpm = Get-Command pnpm.cmd, pnpm.exe -All -ErrorAction SilentlyContinue |
+  Where-Object { (& $_.Source --version) -eq '11.5.0' } |
+  Select-Object -First 1 -ExpandProperty Source
+if (!$pnpm) { throw 'pnpm 11.5.0 is required (repository pin)' }
 $node = (Get-Command node.exe).Source
 $rust = Join-Path $env:USERPROFILE '.rustup/toolchains/stable-x86_64-pc-windows-msvc/bin'
 if (!(Test-Path "$rust/cargo.exe") -or !(Test-Path "$rust/rustc.exe")) { throw 'Missing stable MSVC Rust' }
